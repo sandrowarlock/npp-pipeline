@@ -63,6 +63,21 @@ intelligence reports.
 - Reports must be generated via API with no conversation history
   to avoid context bias
 
+## GitHub Secrets
+All sensitive credentials are stored as GitHub Secrets
+and accessed via process.env in workflow scripts.
+Never hardcode these values.
+
+- YOUTUBE_API_KEY — YouTube Data API v3
+- TRANSCRIPT_API_KEY — YouTube transcript API
+- ANTHROPIC_API_KEY — Claude API for filtering and reports
+- SUPABASE_URL — NPP Supabase project URL
+- SUPABASE_SERVICE_KEY — NPP Supabase service role key (write access)
+- GAMALYTIC_API_KEY — Gamalytic API for wishlist data
+- APIFY_API_KEY — Apify for Steam discussions scraping
+- SCRAPER_SUPABASE_URL — Discord scraper Supabase project URL
+- SCRAPER_SUPABASE_KEY — Discord scraper Supabase anon key (read only)
+
 ## Workflows (GitHub Actions)
 
 ### 1. add-games-to-track
@@ -130,17 +145,129 @@ intelligence reports.
 - Writes top 10 to: daily_top10 table
 
 ## Database Tables (Supabase)
-Schema to be defined — see separate schema design document.
-Key tables:
-- games_static
-- games_tracking
-- games_daily_snapshots
-- discord_snapshots
-- youtube_videos
-- steam_discussions
-- steam_discussion_replies
-- fastest_risers
-- daily_top10
+Full schema lives in /database/schema.sql. Summary of all tables:
+
+### games_static
+Static metadata for each tracked game, sourced from the Steam Store API.
+- app_id (integer, PK)
+- name (text, not null)
+- first_seen_date (date)
+- release_date (text)
+- release_date_parsed (date)
+- released (boolean, default false)
+- last_static_update (date)
+- short_description (text)
+- long_description (text)
+- tag1–tag20 (text, nullable)
+- developer1–developer3 (text, nullable)
+- publisher1–publisher3 (text, nullable)
+- languages_count (integer)
+- full_audio_languages (text)
+- controller_support (text)
+- discord_url (text)
+- discord_invite_code (text)
+- x_url (text)
+- reddit_url (text)
+- website_url (text)
+- tracking_source (text)
+- study_tags (text)
+- data_sources (text)
+
+### games_static_history
+Audit log of field-level changes to games_static. Populated automatically
+by a Postgres trigger — do not write to directly.
+- id (bigint, PK, auto-increment)
+- app_id (integer)
+- changed_at (timestamptz, default now())
+- changed_fields (jsonb) — format: {"field": {"old": ..., "new": ...}}
+
+### games_daily_snapshots
+One row per (date, app_id). Daily wishlist count and Discord stats per
+tracked game. Unique constraint on (date, app_id).
+- id (bigint, PK, auto-increment)
+- date (date)
+- app_id (integer, FK → games_static)
+- wishlist_count (integer)
+- discord_member_count (integer)
+- discord_online_count (integer)
+- data_source (text, default 'live')
+
+### wishlist_bracket_snapshots
+Daily snapshot of all unreleased games in the 0–5,000 wishlist range,
+used to calculate day-over-day growth. Unique constraint on (date, app_id).
+- id (bigint, PK, auto-increment)
+- date (date)
+- app_id (integer)
+- game_name (text)
+- wishlist_count (integer)
+- previous_wishlist_count (integer)
+- daily_growth_absolute (integer)
+- daily_growth_percent (float)
+
+### daily_top10_risers
+Top 10 fastest-growing tracked games per day, ranked by wishlist growth.
+Unique constraint on (date, rank).
+- id (bigint, PK, auto-increment)
+- date (date)
+- rank (integer)
+- app_id (integer)
+- game_name (text)
+- wishlist_count (integer)
+- daily_growth_absolute (integer)
+- daily_growth_percent (float)
+
+### youtube_videos
+YouTube videos associated with tracked games, relevance-scored via Claude API.
+- video_id (text, PK)
+- app_id (integer, FK → games_static)
+- title (text)
+- channel_name (text)
+- published_at (timestamptz)
+- views (integer)
+- likes (integer)
+- comment_count (integer)
+- language (text)
+- has_transcript (boolean)
+- last_updated (date)
+
+### youtube_comments
+Comments scraped from tracked YouTube videos.
+- comment_id (text, PK)
+- video_id (text, FK → youtube_videos)
+- app_id (integer, FK → games_static)
+- comment_text (text)
+- comment_likes (integer)
+- published_at (timestamptz)
+
+### youtube_transcripts
+Full transcripts for tracked YouTube videos. One row per video.
+- video_id (text, PK, FK → youtube_videos)
+- app_id (integer, FK → games_static)
+- language (text)
+- transcript_text (text)
+- has_transcript (boolean)
+
+### steam_discussions
+Steam discussion threads scraped for each tracked game.
+- topic_id (text, PK)
+- app_id (integer, FK → games_static)
+- title (text)
+- author_name (text)
+- reply_count (integer)
+- opening_post_body (text)
+- last_posted_at (timestamptz)
+- is_pinned (boolean)
+- is_locked (boolean)
+- scraped_date (date)
+
+### steam_discussion_replies
+Individual replies within tracked Steam discussion threads.
+- comment_id (text, PK)
+- topic_id (text, FK → steam_discussions)
+- app_id (integer, FK → games_static)
+- author (text)
+- text (text)
+- scraped_date (date)
 
 ## Key Business Rules
 - Wishlist velocity uses percentage growth, not absolute numbers
