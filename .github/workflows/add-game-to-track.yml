@@ -1,0 +1,45 @@
+name: Add Game To Track
+
+on:
+  workflow_dispatch:
+    inputs:
+      steam_app_id:
+        description: 'Steam App ID'
+        required: true
+        type: string
+      tracking_source:
+        description: 'Tracking source (manual, genre_study, auto)'
+        required: false
+        default: 'manual'
+        type: string
+      study_tags:
+        description: 'Study tags (e.g. roguelike_study)'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  add-game:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install dependencies
+        run: npm install
+        working-directory: scripts
+
+      - name: Run script
+        run: node add-game-to-track.js
+        working-directory: scripts
+        env:
+          STEAM_APP_ID: ${{ inputs.steam_app_id }}
+          TRACKING_SOURCE: ${{ inputs.tracking_source }}
+          STUDY_TAGS: ${{ inputs.study_tags }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
