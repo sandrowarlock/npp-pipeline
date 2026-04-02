@@ -1,0 +1,8 @@
+{
+  "name": "npp-pipeline-scripts",
+  "version": "1.0.0",
+  "description": "NPP Pipeline workflow scripts",
+  "dependencies": {
+    "@supabase/supabase-js": "^2.0.0"
+  }
+}
