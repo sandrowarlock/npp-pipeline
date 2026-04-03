@@ -164,12 +164,18 @@ async function enrichGame(appId, { trackingSource = 'manual', studyTags = null }
 
   // -------------------------------------------------------------------------
   // Determine released status
-  // If the release date parses as a real past date, the game is out.
+  // Only treat a game as released if the date string is a full specific date
+  // in Steam's format: "D Mon, YYYY" or "DD Mon, YYYY" (e.g. "21 Mar, 2024").
+  // Vague strings like "Q4 2025", "Coming Soon", "2024", "To be announced"
+  // do not match and leave both fields at their safe defaults (false / null).
+  // This prevents incorrectly marking unreleased games as released.
   // -------------------------------------------------------------------------
-  let released         = false;
+  let released          = false;
   let releaseDateParsed = null;
 
-  if (releaseDateText) {
+  const FULL_DATE_PATTERN = /^\d{1,2} \w{3}, \d{4}$/;
+
+  if (releaseDateText && FULL_DATE_PATTERN.test(releaseDateText)) {
     try {
       const parsedDate = new Date(releaseDateText);
       if (!isNaN(parsedDate.getTime())) {
@@ -177,7 +183,7 @@ async function enrichGame(appId, { trackingSource = 'manual', studyTags = null }
         released = parsedDate < new Date();
       }
     } catch {
-      // Unparseable date string (e.g. "Coming soon") — released stays false
+      // Parsing failed despite matching the pattern — leave defaults in place
     }
   }
 
