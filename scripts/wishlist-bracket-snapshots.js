@@ -98,8 +98,16 @@ async function fetchPage(page) {
       return { success: false, error: `Network error: ${err.message}` };
     }
 
+    if (page === 0) {
+      console.log('[DEBUG] Gamalytic response status:', response.status);
+    }
+
     if (response.ok) {
-      const data = await response.json();
+      const text = await response.text();
+      if (page === 0) {
+        console.log('[DEBUG] Gamalytic raw response body:', text);
+      }
+      const data = JSON.parse(text);
       return { success: true, data };
     }
 
