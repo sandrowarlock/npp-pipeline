@@ -75,6 +75,12 @@ async function fetchPage(page) {
   const url     = `${GAMALYTIC_BASE}?${params}`;
   const headers = { 'api-key': GAMALYTIC_API_KEY };
 
+  // Debug logging on first page only — confirms URL and headers before any requests go out
+  if (page === 0) {
+    console.log('[DEBUG] Gamalytic request URL:', url);
+    console.log('[DEBUG] Gamalytic request headers:', { 'api-key': '***' });
+  }
+
   // attempt 0 = initial request; attempts 1-3 = retries
   for (let attempt = 0; attempt <= 3; attempt++) {
     if (attempt > 0) {
