@@ -31,7 +31,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-const GAMALYTIC_BASE    = 'https://gamalytic.com/api/steam-games/list';
+const GAMALYTIC_BASE    = 'https://api.gamalytic.com/steam-games/list';
 const LIMIT             = 1000;
 const PAGE_DELAY_MS     = 2000;          // delay between pages (rate limit safety)
 const RETRY_DELAYS      = [2000, 4000, 8000]; // delays before retries 1, 2, 3
