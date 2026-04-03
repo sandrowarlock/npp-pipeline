@@ -149,6 +149,7 @@ CREATE TABLE IF NOT EXISTS games_daily_snapshots (
     date                    DATE,
     app_id                  INTEGER     REFERENCES games_static (app_id),
     wishlist_count          INTEGER,
+    followers_count         INTEGER,
     discord_member_count    INTEGER,
     discord_online_count    INTEGER,
     data_source             TEXT        DEFAULT 'live',
@@ -169,6 +170,7 @@ CREATE TABLE IF NOT EXISTS wishlist_bracket_snapshots (
     app_id         INTEGER,
     game_name      TEXT,
     wishlist_count INTEGER,
+    wishlists_7d   INTEGER,
 
     CONSTRAINT uq_bracket_snapshot UNIQUE (date, app_id)
 );
