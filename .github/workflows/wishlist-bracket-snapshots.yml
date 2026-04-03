@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 jobs:
-  snapshot:
+  fetch-and-store:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
@@ -28,3 +28,21 @@ jobs:
           GAMALYTIC_API_KEY: ${{ secrets.GAMALYTIC_API_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+
+  promote:
+    needs: fetch-and-store
+    if: success()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger promote-top10-to-games-static workflow
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'promote-top10-to-games-static.yml',
+              ref: 'main',
+            });
+            console.log('Triggered promote-top10-to-games-static workflow');
