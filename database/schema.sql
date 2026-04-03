@@ -164,14 +164,11 @@ CREATE TABLE IF NOT EXISTS games_daily_snapshots (
 -- day-over-day growth and populate the fastest-risers feed.
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS wishlist_bracket_snapshots (
-    id                      BIGINT      PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
-    date                    DATE,
-    app_id                  INTEGER,
-    game_name               TEXT,
-    wishlist_count          INTEGER,
-    previous_wishlist_count INTEGER,
-    daily_growth_absolute   INTEGER,
-    daily_growth_percent    FLOAT,
+    id             BIGINT      PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+    date           DATE,
+    app_id         INTEGER,
+    game_name      TEXT,
+    wishlist_count INTEGER,
 
     CONSTRAINT uq_bracket_snapshot UNIQUE (date, app_id)
 );
