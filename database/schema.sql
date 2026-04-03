@@ -182,14 +182,13 @@ CREATE TABLE IF NOT EXISTS wishlist_bracket_snapshots (
 -- growth. Written by the daily-top-10 workflow after snapshots are taken.
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS daily_top10_risers (
-    id                      BIGINT      PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
-    date                    DATE,
-    rank                    INTEGER,
-    app_id                  INTEGER,
-    game_name               TEXT,
-    wishlist_count          INTEGER,
-    daily_growth_absolute   INTEGER,
-    daily_growth_percent    FLOAT,
+    id             BIGINT      PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+    date           DATE,
+    rank           INTEGER,
+    app_id         INTEGER,
+    game_name      TEXT,
+    wishlist_count INTEGER,
+    wishlists_7d   INTEGER,
 
     CONSTRAINT uq_top10_rank UNIQUE (date, rank)
 );
