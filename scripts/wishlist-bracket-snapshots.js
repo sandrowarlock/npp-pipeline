@@ -75,12 +75,6 @@ async function fetchPage(page) {
   const url     = `${GAMALYTIC_BASE}?${params}`;
   const headers = { 'api-key': GAMALYTIC_API_KEY };
 
-  // Debug logging on first page only — confirms URL and headers before any requests go out
-  if (page === 0) {
-    console.log('[DEBUG] Gamalytic request URL:', url);
-    console.log('[DEBUG] Gamalytic request headers:', { 'api-key': '***' });
-  }
-
   // attempt 0 = initial request; attempts 1-3 = retries
   for (let attempt = 0; attempt <= 3; attempt++) {
     if (attempt > 0) {
@@ -98,16 +92,8 @@ async function fetchPage(page) {
       return { success: false, error: `Network error: ${err.message}` };
     }
 
-    if (page === 0) {
-      console.log('[DEBUG] Gamalytic response status:', response.status);
-    }
-
     if (response.ok) {
-      const text = await response.text();
-      if (page === 0) {
-        console.log('[DEBUG] Gamalytic raw response body:', text);
-      }
-      const data = JSON.parse(text);
+      const data = await response.json();
       return { success: true, data };
     }
 
@@ -166,10 +152,11 @@ async function main() {
         continue;
       }
 
-      const games = result.data;
+      // Gamalytic wraps results in { pages, total, result: [...] }
+      const games = result.data.result;
 
       if (!Array.isArray(games) || games.length === 0) {
-        console.log(`Page ${page}: empty response — pagination complete.`);
+        console.log(`Page ${page}: empty result array — pagination complete.`);
         break;
       }
 
