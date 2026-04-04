@@ -40,6 +40,13 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 // corresponding workflows (youtube-enrichment, steam-discussions, etc.) exist.
 // ---------------------------------------------------------------------------
 async function runDownstreamWorkflows(appId, gameName) {
+  // IDEMPOTENCY REQUIREMENT: When these triggers are wired up with real
+  // GitHub Actions API calls, do NOT add a "already triggered today"
+  // database flag to gate them. Instead, ensure each downstream script
+  // uses upserts (onConflict) so that re-running them for the same app_id
+  // and date is safe. This keeps promote-top10 itself idempotent: if it
+  // is re-run today (e.g. after a failure), it will simply re-trigger the
+  // downstream workflows, which will upsert their data without duplicating rows.
   console.log(`  → Would run daily-game-snapshot for ${appId} (${gameName})`);
   console.log(`  → Would run youtube-enrichment for ${appId} (${gameName})`);
   console.log(`  → Would run steam-discussions for ${appId} (${gameName})`);
