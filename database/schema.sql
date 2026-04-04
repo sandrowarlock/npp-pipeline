@@ -276,3 +276,29 @@ CREATE TABLE IF NOT EXISTS steam_discussion_replies (
     text            TEXT,
     scraped_date    DATE
 );
+
+
+-- -----------------------------------------------------------------------------
+-- 11. pipeline_runs
+-- One row per (workflow_name, run_date). Tracks the outcome of each daily
+-- workflow run for monitoring, alerting, and historical auditing.
+-- Written by each workflow script via scripts/lib/pipeline-logger.js.
+-- -----------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS pipeline_runs (
+    id                    BIGINT      PRIMARY KEY GENERATED ALWAYS AS IDENTITY,
+    workflow_name         TEXT        NOT NULL,
+    run_date              DATE        NOT NULL,
+    status                TEXT        NOT NULL,  -- 'success' | 'partial' | 'failure'
+    rows_written          INTEGER,
+    rows_expected         INTEGER,
+    null_wishlist_count   INTEGER,
+    null_followers_count  INTEGER,
+    discord_gaps          INTEGER,
+    notes                 TEXT,
+    created_at            TIMESTAMPTZ DEFAULT NOW()
+);
+
+-- Unique index ensures one log row per workflow per day, and enables
+-- upsert on (workflow_name, run_date) conflict.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_pipeline_runs_workflow_date
+    ON pipeline_runs (workflow_name, run_date);
