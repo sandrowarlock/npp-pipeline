@@ -5,6 +5,10 @@ on:
     - cron: '0 6 * * *'
   workflow_dispatch:
 
+permissions:
+  actions: write
+  contents: read
+
 jobs:
   fetch-and-store:
     runs-on: ubuntu-latest
