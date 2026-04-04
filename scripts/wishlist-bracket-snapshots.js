@@ -13,6 +13,7 @@
 //   4. Purge wishlist_bracket_snapshots rows older than 7 days
 
 const { createClient } = require('@supabase/supabase-js');
+const { logRun }       = require('./lib/pipeline-logger');
 
 // ---------------------------------------------------------------------------
 // Environment variables
@@ -123,7 +124,13 @@ async function fetchPage(page) {
 // Main
 // ---------------------------------------------------------------------------
 async function main() {
-  const today = new Date().toISOString().split('T')[0];
+  const today     = new Date().toISOString().split('T')[0];
+  const yesterday = new Date(Date.now() - 864e5).toISOString().split('T')[0];
+
+  // Tracking variables for the pipeline log entry
+  let skippedPages = 0;
+  let totalWritten = 0;
+  let purgedRows   = 0;
 
   // -------------------------------------------------------------------------
   // Step 1 — Paginate through Gamalytic API
@@ -147,6 +154,7 @@ async function main() {
         }
         // Transient failure after all retries — skip page and continue
         console.warn(`Page ${page}: all retries failed — ${result.error}. Skipping page.`);
+        skippedPages++;
         page++;
         await sleep(PAGE_DELAY_MS);
         continue;
@@ -177,10 +185,18 @@ async function main() {
     process.exit(1);
   }
 
-  // If Gamalytic returned nothing at all, something is wrong — fail the run
-  // so GitHub Actions marks it as failed and sends a notification email.
+  // If Gamalytic returned nothing at all, something is wrong — log failure and exit.
   if (allGames.length === 0) {
     console.error('Error: Gamalytic returned no games. Exiting with failure.');
+    try {
+      await logRun(supabase, {
+        workflowName: 'wishlist-bracket-snapshots',
+        status:       'failure',
+        notes:        'Gamalytic returned no games',
+      });
+    } catch (logErr) {
+      console.warn(`Pipeline log failed: ${logErr.message}`);
+    }
     process.exit(1);
   }
 
@@ -202,7 +218,6 @@ async function main() {
     }));
 
     const chunks = chunkArray(rows, BATCH_SIZE);
-    let totalWritten = 0;
 
     for (const chunk of chunks) {
       const { error } = await supabase
@@ -274,10 +289,40 @@ async function main() {
 
     if (error) throw new Error(error.message);
 
-    console.log(`Purged ${data?.length ?? 0} rows older than ${cutoffDate}`);
+    purgedRows = data?.length ?? 0;
+    console.log(`Purged ${purgedRows} rows older than ${cutoffDate}`);
   } catch (err) {
     console.error(`Step 4 failed (purging old snapshots): ${err.message}`);
     process.exit(1);
+  }
+
+  // -------------------------------------------------------------------------
+  // Log pipeline run outcome
+  // Queries yesterday's row count as the baseline expectation, then logs the
+  // result. A logging failure never crashes the workflow.
+  // -------------------------------------------------------------------------
+  try {
+    const { count: rowsExpected } = await supabase
+      .from('wishlist_bracket_snapshots')
+      .select('*', { count: 'exact', head: true })
+      .eq('date', yesterday);
+
+    const notes = [
+      skippedPages > 0  ? `${skippedPages} pages skipped` : null,
+      purgedRows   > 0  ? `purged ${purgedRows} rows`      : null,
+    ].filter(Boolean).join(', ') || null;
+
+    await logRun(supabase, {
+      workflowName: 'wishlist-bracket-snapshots',
+      status:       skippedPages > 0 ? 'partial' : 'success',
+      rowsWritten:  totalWritten,
+      rowsExpected: rowsExpected ?? null,
+      notes,
+    });
+
+    console.log('Pipeline run logged.');
+  } catch (logErr) {
+    console.warn(`Pipeline log failed: ${logErr.message}`);
   }
 
   console.log('\n✓ wishlist-bracket-snapshots complete.');

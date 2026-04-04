@@ -19,6 +19,7 @@
 
 const { createClient } = require('@supabase/supabase-js');
 const { enrichGame }   = require('./lib/steam-enrichment');
+const { logRun }       = require('./lib/pipeline-logger');
 
 // ---------------------------------------------------------------------------
 // Environment variables
@@ -73,6 +74,15 @@ async function main() {
 
     if (!data || data.length === 0) {
       console.log('No top 10 risers found for today. Exiting.');
+      try {
+        await logRun(supabase, {
+          workflowName: 'promote-top10-to-games-static',
+          status:       'failure',
+          notes:        'No top 10 risers found for today',
+        });
+      } catch (logErr) {
+        console.warn(`Pipeline log failed: ${logErr.message}`);
+      }
       process.exit(0);
     }
 
@@ -117,6 +127,16 @@ async function main() {
     console.log(`Already tracked (skipped): ${alreadyTracked}`);
     console.log(`Newly added: 0`);
     console.log(`Failed: 0`);
+    try {
+      await logRun(supabase, {
+        workflowName: 'promote-top10-to-games-static',
+        status:       'success',
+        rowsWritten:  0,
+        notes:        `${totalInTop10} in top 10, ${alreadyTracked} already tracked, 0 new, 0 failed`,
+      });
+    } catch (logErr) {
+      console.warn(`Pipeline log failed: ${logErr.message}`);
+    }
     process.exit(0);
   }
 
@@ -166,6 +186,18 @@ async function main() {
   console.log(`Already tracked (skipped): ${alreadyTracked}`);
   console.log(`Newly added: ${newlyAdded}`);
   console.log(`Failed: ${failed}`);
+
+  // Log pipeline run outcome — always attempt, never crash on failure
+  try {
+    await logRun(supabase, {
+      workflowName: 'promote-top10-to-games-static',
+      status:       failed > 0 ? 'partial' : 'success',
+      rowsWritten:  newlyAdded,
+      notes:        `${totalInTop10} in top 10, ${alreadyTracked} already tracked, ${newlyAdded} new, ${failed} failed`,
+    });
+  } catch (logErr) {
+    console.warn(`Pipeline log failed: ${logErr.message}`);
+  }
 
   // Exit non-zero if any enrichment failed so GitHub marks the run as failed
   // and sends a notification email — but don't fail just because games were skipped.
