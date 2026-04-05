@@ -59,6 +59,29 @@ function msToDateStr(ms) {
   return new Date(ms).toISOString().split('T')[0];
 }
 
+// Fetch all rows from a Supabase query builder in batches of 1,000,
+// paginating with .range() until a batch returns fewer than 1,000 rows.
+// `queryFn` receives (from, to) and must return a Supabase query with
+// .select() already applied — range is appended here.
+// Returns a flat array of all rows across all pages.
+async function fetchAllRows(queryFn, batchSize = 1000) {
+  const all = [];
+  let offset = 0;
+
+  while (true) {
+    const { data, error } = await queryFn(offset, offset + batchSize - 1);
+    if (error) throw new Error(error.message);
+
+    const rows = data || [];
+    all.push(...rows);
+
+    if (rows.length < batchSize) break;
+    offset += batchSize;
+  }
+
+  return all;
+}
+
 // Upsert an array of rows in chunks on the given conflict target.
 // Returns the total number of rows attempted.
 async function upsertInChunks(client, table, rows, chunkSize, onConflict) {
@@ -140,14 +163,15 @@ async function main() {
   }
 
   try {
-    const { data, error } = await supabase
-      .from('games_daily_snapshots')
-      .select('app_id, date, wishlist_count, discord_member_count, discord_online_count')
-      .in('app_id', appIds);
+    const allRows = await fetchAllRows((from, to) =>
+      supabase
+        .from('games_daily_snapshots')
+        .select('app_id, date, wishlist_count, discord_member_count, discord_online_count')
+        .in('app_id', appIds)
+        .range(from, to)
+    );
 
-    if (error) throw new Error(error.message);
-
-    for (const row of (data || [])) {
+    for (const row of allRows) {
       const dateStr = typeof row.date === 'string' ? row.date.split('T')[0] : row.date;
 
       if (row.wishlist_count !== null) {
@@ -163,8 +187,7 @@ async function main() {
       }
     }
 
-    const totalExisting = (data || []).length;
-    console.log(`Found ${totalExisting} existing snapshot rows across all games.`);
+    console.log(`Found ${allRows.length} existing snapshot rows across all games.`);
   } catch (err) {
     console.error(`Step 2 failed: ${err.message}`);
     process.exit(1);
@@ -366,13 +389,20 @@ async function main() {
         if (serverIds.length === 0) {
           console.warn('  No active Discord servers found in scraper.');
         } else {
-          // 5c — Pull all historical daily_snapshots for those servers
-          const { data: snapshots, error: snErr } = await scraperSupabase
-            .from('daily_snapshots')
-            .select('discord_server_id, snapshot_date, member_count, online_count')
-            .in('discord_server_id', serverIds);
-
-          if (snErr) throw new Error(`Scraper daily_snapshots query failed: ${snErr.message}`);
+          // 5c — Pull all historical daily_snapshots for those servers.
+          // Paginated — this table grows continuously as the scraper runs daily.
+          let snapshots;
+          try {
+            snapshots = await fetchAllRows((from, to) =>
+              scraperSupabase
+                .from('daily_snapshots')
+                .select('discord_server_id, snapshot_date, member_count, online_count')
+                .in('discord_server_id', serverIds)
+                .range(from, to)
+            );
+          } catch (snErr) {
+            throw new Error(`Scraper daily_snapshots query failed: ${snErr.message}`);
+          }
 
           const discordRows = [];
 
