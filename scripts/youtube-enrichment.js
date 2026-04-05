@@ -47,7 +47,7 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 const YOUTUBE_SEARCH_URL   = 'https://www.googleapis.com/youtube/v3/search';
 const YOUTUBE_VIDEOS_URL   = 'https://www.googleapis.com/youtube/v3/videos';
 const YOUTUBE_COMMENTS_URL = 'https://www.googleapis.com/youtube/v3/commentThreads';
-const TRANSCRIPT_API_URL   = 'https://api.supadata.ai/v1/youtube/transcript';
+const TRANSCRIPT_API_URL   = 'https://transcriptapi.com/api/v2/youtube/transcript';
 const ANTHROPIC_API_URL    = 'https://api.anthropic.com/v1/messages';
 
 // Only process games whose youtube_videos rows are older than this many days.
@@ -458,10 +458,8 @@ async function main() {
 
       try {
         const params = new URLSearchParams({
-          url: `https://www.youtube.com/watch?v=${video_id}`,
-          // text:true omitted — we want the full timestamped array format:
-          // [{ text, start, duration }, ...] stored as a JSON string so
-          // downstream report generation can correlate moments with signals.
+          video_url: video_id,
+          format:    'json',
         });
 
         let transcriptText = null;
@@ -470,22 +468,24 @@ async function main() {
 
         try {
           const response = await fetchWithRetry(`${TRANSCRIPT_API_URL}?${params}`, {
-            headers: { 'x-api-key': TRANSCRIPT_API_KEY },
+            headers: { 'Authorization': `Bearer ${TRANSCRIPT_API_KEY}` },
           });
           const data = await response.json();
 
-          // Supadata returns either:
-          //   { content: [{text, start, duration}, ...], lang: "en" }  (array format)
-          //   { content: "plain text string", lang: "en" }              (text:true format)
-          // We always serialise to JSON string so the DB column stays consistent.
-          if (Array.isArray(data.content) && data.content.length > 0) {
-            transcriptText = JSON.stringify(data.content);
-            language       = data.lang ?? null;
-            hasTranscript  = true;
-          } else if (typeof data.content === 'string' && data.content.length > 0) {
-            // Fallback: API returned plain text — wrap in array shape for consistency
-            transcriptText = JSON.stringify([{ text: data.content, start: 0, duration: 0 }]);
-            language       = data.lang ?? null;
+          // transcriptapi.com wraps segments under one of several fields depending
+          // on the response shape — try each in order until we find a non-empty array.
+          const segments =
+            (Array.isArray(data.segments)            && data.segments.length            ? data.segments            : null) ??
+            (Array.isArray(data.transcript)          && data.transcript.length          ? data.transcript          : null) ??
+            (Array.isArray(data.data?.segments)      && data.data.segments.length       ? data.data.segments       : null) ??
+            null;
+
+          if (segments) {
+            // Store the full segments array as a JSON string — all fields intact
+            // (text, start, duration, etc.) with no character limit, so report
+            // generation can correlate specific moments with external signals.
+            transcriptText = JSON.stringify(segments);
+            language       = data.language ?? data.lang ?? null;
             hasTranscript  = true;
           }
         } catch (err) {
