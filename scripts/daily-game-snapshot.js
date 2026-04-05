@@ -179,8 +179,13 @@ async function main() {
   // -------------------------------------------------------------------------
   console.log('\nStep 3: Fetching Gamalytic history per game...');
 
-  const gamalyticRows = []; // rows to upsert after processing all games
-  let gamalyticErrors = 0;
+  // Use a Map keyed by "app_id:date" to deduplicate within the batch.
+  // Gamalytic's history array often includes today's date; we also always
+  // push a live row for today. The Map ensures the live row (written last)
+  // wins for today, and Postgres never sees two rows with the same
+  // (date, app_id) in a single upsert — which would cause an error.
+  const gamalyticRowMap = new Map(); // "app_id:date" → row object
+  let gamalyticErrors   = 0;
 
   for (const game of games) {
     const { app_id, name } = game;
@@ -221,7 +226,7 @@ async function main() {
         continue;
       }
 
-      gamalyticRows.push({
+      gamalyticRowMap.set(`${app_id}:${dateStr}`, {
         date:                 dateStr,
         app_id,
         wishlist_count:       entry.wishlists         ?? null,
@@ -235,8 +240,10 @@ async function main() {
 
     // Always write today using the top-level current values — history array
     // can lag by a day, so this guarantees today's row is always fresh.
+    // Writing into the Map last means the live row overwrites any history
+    // entry for today, eliminating duplicates within the batch.
     const todayDiscord = discordByDate.get(today);
-    gamalyticRows.push({
+    gamalyticRowMap.set(`${app_id}:${today}`, {
       date:                 today,
       app_id,
       wishlist_count:       currentWish,
@@ -261,6 +268,7 @@ async function main() {
   // On conflict (date, app_id), update wishlist and followers but never
   // overwrite discord columns that already have data.
   // -------------------------------------------------------------------------
+  const gamalyticRows = [...gamalyticRowMap.values()];
   console.log(`\nStep 4: Upserting ${gamalyticRows.length} Gamalytic row(s)...`);
 
   let gamalyticRowsWritten = 0;
