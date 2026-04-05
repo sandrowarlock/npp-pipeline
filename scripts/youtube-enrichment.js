@@ -125,9 +125,12 @@ async function filterWithClaude(game, videos) {
   const data = await response.json();
   const text = data.content?.[0]?.text ?? '';
 
+  // Strip markdown code fences if Claude wraps the response (e.g. ```json ... ```)
+  const cleaned = text.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '').trim();
+
   let ids;
   try {
-    ids = JSON.parse(text);
+    ids = JSON.parse(cleaned);
   } catch {
     throw new Error(`Failed to parse Claude response as JSON: ${text.slice(0, 200)}`);
   }
