@@ -2,7 +2,7 @@
 // Workflow: daily-heartbeat
 //
 // Runs daily at 09:00 UTC — after all upstream workflows have had time to
-// complete — and checks yesterday's pipeline_runs rows for red flags.
+// complete — and checks today's pipeline_runs rows for red flags.
 // Exits with a non-zero code if any issues are found so GitHub Actions marks
 // the run as failed and sends a notification email.
 //
@@ -49,10 +49,10 @@ function pct(actual, expected) {
 // Main
 // ---------------------------------------------------------------------------
 async function main() {
-  // "Yesterday" in UTC — all upstream workflows run before 09:00 UTC
-  const yesterday = new Date(Date.now() - 864e5).toISOString().split('T')[0];
+  // Today in UTC — all upstream workflows run before 09:00 UTC
+  const today = new Date().toISOString().split('T')[0];
 
-  console.log(`Daily heartbeat check for: ${yesterday}\n`);
+  console.log(`Daily heartbeat check for: ${today}\n`);
 
   const alerts = [];
 
@@ -60,7 +60,7 @@ async function main() {
   // Check 1 — wishlist-bracket-snapshots
   // -------------------------------------------------------------------------
   try {
-    const run = await getRun(supabase, 'wishlist-bracket-snapshots', yesterday);
+    const run = await getRun(supabase, 'wishlist-bracket-snapshots', today);
 
     if (!run) {
       alerts.push(
@@ -87,7 +87,7 @@ async function main() {
   // Check 2 — promote-top10-to-games-static
   // -------------------------------------------------------------------------
   try {
-    const run = await getRun(supabase, 'promote-top10-to-games-static', yesterday);
+    const run = await getRun(supabase, 'promote-top10-to-games-static', today);
 
     if (!run) {
       alerts.push(
@@ -114,7 +114,7 @@ async function main() {
   // Check 3 — daily-game-snapshot
   // -------------------------------------------------------------------------
   try {
-    const run = await getRun(supabase, 'daily-game-snapshot', yesterday);
+    const run = await getRun(supabase, 'daily-game-snapshot', today);
 
     if (!run) {
       alerts.push(
@@ -149,13 +149,13 @@ async function main() {
   // Report
   // -------------------------------------------------------------------------
   if (alerts.length > 0) {
-    console.error(`${alerts.length} red flag(s) found for ${yesterday}:\n`);
+    console.error(`${alerts.length} red flag(s) found for ${today}:\n`);
     alerts.forEach(a => console.error(`  ✗ ${a}`));
     console.error('');
     process.exit(1);
   }
 
-  console.log(`✓ All pipeline checks passed for ${yesterday}`);
+  console.log(`✓ All pipeline checks passed for ${today}`);
 }
 
 main();
