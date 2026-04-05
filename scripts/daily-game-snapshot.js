@@ -59,9 +59,9 @@ function msToDateStr(ms) {
   return new Date(ms).toISOString().split('T')[0];
 }
 
-// Upsert an array of rows in chunks, updating only the specified columns on
-// conflict. Returns the total number of rows attempted.
-async function upsertInChunks(client, table, rows, chunkSize, onConflict, updateColumns) {
+// Upsert an array of rows in chunks on the given conflict target.
+// Returns the total number of rows attempted.
+async function upsertInChunks(client, table, rows, chunkSize, onConflict) {
   let total = 0;
   for (let i = 0; i < rows.length; i += chunkSize) {
     const chunk = rows.slice(i, i + chunkSize);
@@ -110,38 +110,56 @@ async function main() {
   const appIds = games.map(g => g.app_id);
 
   // -------------------------------------------------------------------------
-  // Step 2 — Get existing snapshot dates per game
+  // Step 2 — Get existing snapshot dates and Discord values per game
   //
   // Single bulk query — no per-game queries.
-  // We build two Maps:
-  //   existingWishlistDates : app_id → Set<YYYY-MM-DD>  (non-null wishlist_count)
-  //   existingDiscordDates  : app_id → Set<YYYY-MM-DD>  (non-null discord_member_count)
+  // We build:
+  //   existingWishlistDates : app_id → Set<YYYY-MM-DD>
+  //     Dates where wishlist_count is already stored. Gamalytic rows skip
+  //     these dates entirely rather than overwriting with duplicate data.
+  //
+  //   existingDiscordData   : app_id → Map<YYYY-MM-DD, {member, online}>
+  //     Dates that already have Discord data, along with the actual values.
+  //     Used in Step 3 so Gamalytic rows copy existing Discord values
+  //     instead of writing null — the Supabase JS client has no partial-
+  //     column-update syntax, so we merge at the application layer instead.
+  //
+  //   existingDiscordDates  : app_id → Set<YYYY-MM-DD>
+  //     Convenience set used in Step 5 to skip Discord rows already stored.
   // -------------------------------------------------------------------------
   console.log('\nStep 2: Loading existing snapshot dates...');
 
   const existingWishlistDates = new Map(); // app_id → Set<string>
   const existingDiscordDates  = new Map(); // app_id → Set<string>
+  const existingDiscordData   = new Map(); // app_id → Map<string, {member, online}>
 
   for (const id of appIds) {
     existingWishlistDates.set(id, new Set());
     existingDiscordDates.set(id, new Set());
+    existingDiscordData.set(id, new Map());
   }
 
   try {
     const { data, error } = await supabase
       .from('games_daily_snapshots')
-      .select('app_id, date, wishlist_count, discord_member_count')
+      .select('app_id, date, wishlist_count, discord_member_count, discord_online_count')
       .in('app_id', appIds);
 
     if (error) throw new Error(error.message);
 
     for (const row of (data || [])) {
       const dateStr = typeof row.date === 'string' ? row.date.split('T')[0] : row.date;
+
       if (row.wishlist_count !== null) {
         existingWishlistDates.get(row.app_id)?.add(dateStr);
       }
+
       if (row.discord_member_count !== null) {
         existingDiscordDates.get(row.app_id)?.add(dateStr);
+        existingDiscordData.get(row.app_id)?.set(dateStr, {
+          member: row.discord_member_count,
+          online: row.discord_online_count ?? null,
+        });
       }
     }
 
@@ -187,9 +205,16 @@ async function main() {
     let alreadyExisted = 0;
     let newRows        = 0;
 
+    // Discord data already stored for this game, keyed by date string.
+    // We copy existing discord values into Gamalytic rows so the upsert
+    // never overwrites real Discord data with null. The Supabase JS client
+    // cannot do partial-column updates on conflict, so we merge here.
+    const discordByDate = existingDiscordData.get(app_id);
+
     // Process historical entries
     for (const entry of history) {
-      const dateStr = msToDateStr(entry.timeStamp);
+      const dateStr    = msToDateStr(entry.timeStamp);
+      const discord    = discordByDate.get(dateStr);
 
       if (knownDates.has(dateStr)) {
         alreadyExisted++;
@@ -199,10 +224,10 @@ async function main() {
       gamalyticRows.push({
         date:                 dateStr,
         app_id,
-        wishlist_count:       entry.wishlists   ?? null,
-        followers_count:      entry.followers   ?? null,
-        discord_member_count: null,
-        discord_online_count: null,
+        wishlist_count:       entry.wishlists         ?? null,
+        followers_count:      entry.followers         ?? null,
+        discord_member_count: discord?.member         ?? null,
+        discord_online_count: discord?.online         ?? null,
         data_source:          'gamalytic_backfill',
       });
       newRows++;
@@ -210,13 +235,14 @@ async function main() {
 
     // Always write today using the top-level current values — history array
     // can lag by a day, so this guarantees today's row is always fresh.
+    const todayDiscord = discordByDate.get(today);
     gamalyticRows.push({
       date:                 today,
       app_id,
       wishlist_count:       currentWish,
       followers_count:      currentFollo,
-      discord_member_count: null,
-      discord_online_count: null,
+      discord_member_count: todayDiscord?.member      ?? null,
+      discord_online_count: todayDiscord?.online      ?? null,
       data_source:          'live',
     });
     // Count today as new only if it wasn't already stored
