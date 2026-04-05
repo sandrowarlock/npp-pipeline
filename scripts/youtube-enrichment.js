@@ -455,8 +455,10 @@ async function main() {
 
       try {
         const params = new URLSearchParams({
-          url:  `https://www.youtube.com/watch?v=${video_id}`,
-          text: 'true',
+          url: `https://www.youtube.com/watch?v=${video_id}`,
+          // text:true omitted — we want the full timestamped array format:
+          // [{ text, start, duration }, ...] stored as a JSON string so
+          // downstream report generation can correlate moments with signals.
         });
 
         let transcriptText = null;
@@ -469,8 +471,17 @@ async function main() {
           });
           const data = await response.json();
 
-          if (data.content) {
-            transcriptText = data.content;
+          // Supadata returns either:
+          //   { content: [{text, start, duration}, ...], lang: "en" }  (array format)
+          //   { content: "plain text string", lang: "en" }              (text:true format)
+          // We always serialise to JSON string so the DB column stays consistent.
+          if (Array.isArray(data.content) && data.content.length > 0) {
+            transcriptText = JSON.stringify(data.content);
+            language       = data.lang ?? null;
+            hasTranscript  = true;
+          } else if (typeof data.content === 'string' && data.content.length > 0) {
+            // Fallback: API returned plain text — wrap in array shape for consistency
+            transcriptText = JSON.stringify([{ text: data.content, start: 0, duration: 0 }]);
             language       = data.lang ?? null;
             hasTranscript  = true;
           }
