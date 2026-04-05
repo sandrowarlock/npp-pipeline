@@ -196,9 +196,6 @@ async function main() {
   // -------------------------------------------------------------------------
   // Step 3 — Fetch Gamalytic history per game
   //
-  // TODO: verify Gamalytic per-game history endpoint and bulk appids endpoint
-  // work correctly before enabling schedule.
-  // Test locally with real games first.
   // -------------------------------------------------------------------------
   console.log('\nStep 3: Fetching Gamalytic history per game...');
 
