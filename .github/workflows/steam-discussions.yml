@@ -1,0 +1,50 @@
+name: Steam Discussions
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 8 * * *'  # Daily at 08:00 UTC
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install
+        working-directory: scripts
+
+      - name: Run script
+        run: node steam-discussions.js
+        working-directory: scripts
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          APIFY_API_KEY: ${{ secrets.APIFY_API_KEY }}
+
+  trigger-replies:
+    needs: scrape
+    if: success()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger steam-discussion-replies workflow
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.actions.createWorkflowDispatch({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              workflow_id: 'steam-discussion-replies.yml',
+              ref: 'main',
+            });
