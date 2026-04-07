@@ -152,7 +152,7 @@ function parseDiscussionsPage(html) {
     // Opening post body: data-tooltip-forum attribute on the topic container
     const tooltipMatch = /data-tooltip-forum="([^"]*)"/i.exec(match[0]);
     const openingPostBody = tooltipMatch
-      ? htmlToPlainText(tooltipMatch[1]).slice(0, 5000)
+      ? htmlToPlainText(tooltipMatch[1])
       : '';
 
     topics.push({ topicId, title, authorName, replyCount, lastPostedAt, openingPostBody });
