@@ -116,10 +116,13 @@ function parseThreadPage(html) {
     const classList  = classMatch ? classMatch[1] : '';
     if (/\bforum_op\b/.test(classList)) continue;
 
-    // Author: content of .commentthread_comment_author (strip inner tags)
-    const authorBlockMatch = /class="[^"]*commentthread_comment_author[^"]*"[^>]*>([\s\S]*?)<\/div>/i.exec(block);
-    const author = authorBlockMatch
-      ? authorBlockMatch[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim()
+    // Author: extract from the <bdi> inside the data-miniprofile anchor.
+    // The commentthread_comment_author div also contains a popup menu div
+    // ("View Profile", "View Posts") so stripping all tags would pollute
+    // the name. The <bdi> holds only the display name + an empty span.
+    const authorMatch = /data-miniprofile="\d+"[^>]*>\s*<bdi>([\s\S]*?)<\/bdi>/i.exec(block);
+    const author = authorMatch
+      ? authorMatch[1].replace(/<[^>]+>/g, '').trim()
       : '';
 
     // Reply body: .commentthread_comment_text
