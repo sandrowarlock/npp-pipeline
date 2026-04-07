@@ -1,12 +1,11 @@
-name: Steam Discussions
+name: Steam Discussion Replies
 
 on:
-  workflow_dispatch:
-  schedule:
-    - cron: '0 8 * * *'  # Daily at 08:00 UTC
+  workflow_call:       # Called directly from steam-discussions workflow
+  workflow_dispatch:   # Manual trigger for re-runs or standalone use
 
 jobs:
-  scrape:
+  scrape-replies:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repo
@@ -22,14 +21,8 @@ jobs:
         working-directory: scripts
 
       - name: Run script
-        run: node steam-discussions.js
+        run: node steam-discussion-replies.js
         working-directory: scripts
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-
-  scrape-replies:
-    needs: scrape
-    if: success()
-    uses: ./.github/workflows/steam-discussion-replies.yml
-    secrets: inherit
