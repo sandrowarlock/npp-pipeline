@@ -58,7 +58,12 @@ const BETWEEN_GAMES_MS = 2_000;
 function steamHeaders(appId) {
   return {
     'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept':          'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
     'Accept-Language': 'en-US,en;q=0.9',
+    'Connection':      'keep-alive',
+    'Sec-Fetch-Dest':  'document',
+    'Sec-Fetch-Mode':  'navigate',
+    'Sec-Fetch-Site':  'none',
     'Cookie':          `birthtime=0; lastagecheckage=1-January-1990; mature_content=1; wants_mature_content_apps=${appId}`,
   };
 }
@@ -295,8 +300,11 @@ async function main() {
           break pageLoop;
         }
 
-        // Detect login redirect — Steam requires an account session for this hub.
-        if (html.includes('login/home')) {
+        // Detect login redirect — page title is "Sign In" meaning Steam redirected
+        // to the login page rather than serving the discussions hub.
+        // Note: do NOT check for "login/home" in body — that string appears in the
+        // nav header of every public Steam page for unauthenticated users.
+        if (html.includes('<title>Sign In')) {
           console.warn(`  Login required for ${name} — skipping`);
           break pageLoop;
         }
