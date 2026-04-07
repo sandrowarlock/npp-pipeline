@@ -77,40 +77,54 @@ function htmlToPlainText(html) {
 // ---------------------------------------------------------------------------
 
 // Parse all reply blocks from a Steam discussion thread page.
-// Returns { openingPost, replies } where each is an object or array of objects.
+// Returns an array of reply objects.
+//
+// Steam thread pages use this structure per comment:
+//   <div class="commentthread_comment ..." id="comment_{id}">
+//     <div class="commentthread_comment_content">
+//       <div class="commentthread_comment_author">...</div>
+//       <div class="commentthread_comment_text">...</div>
+//       <span class="commentthread_comment_timestamp" data-timestamp="{unix}">
+//     </div>
+//   </div>
+//
+// The opening post (forum_op) uses the same id="comment_..." pattern but has
+// an additional class "forum_op" — we skip it since its content is already
+// stored in steam_discussions.opening_post_body.
 function parseThreadPage(html) {
   const results = [];
 
-  // Match every div that has a data-postid attribute.
-  // Capture the opening tag (group 1) for class inspection, postid (group 2),
-  // and inner content (group 3).
-  const blockPattern = /(<div[^>]+data-postid="(\d+)"[^>]*>)([\s\S]*?)(?=<div[^>]+data-postid="|$)/g;
+  // Match every commentthread_comment div. Capture:
+  //   group 1 — full opening tag (for class inspection and id extraction)
+  //   group 2 — inner block content
+  const blockPattern = /(<div[^>]+class="[^"]*commentthread_comment[^"]*"[^>]*>)([\s\S]*?)(?=<div[^>]+class="[^"]*commentthread_comment[^"]*"|$)/g;
 
   let match;
   while ((match = blockPattern.exec(html)) !== null) {
     const openingTag = match[1];
-    const postId     = match[2];
-    const block      = match[3];
+    const block      = match[2];
 
-    // Skip the opening post — identified by the forum_op class on the container.
-    // It is already stored in steam_discussions.opening_post_body.
+    // Skip the opening post — identified by the forum_op class.
     const classMatch = /class="([^"]*)"/i.exec(openingTag);
     const classList  = classMatch ? classMatch[1] : '';
     if (/\bforum_op\b/.test(classList)) continue;
 
-    // Author: try forum_comment_author first, fall back to commentthread variant
-    const authorMatch =
-      /class="[^"]*forum_comment_author[^"]*"[^>]*>([\s\S]*?)<\/(?:a|span|div)>/i.exec(block) ||
-      /class="[^"]*commentthread_comment_author[^"]*"[^>]*>([\s\S]*?)<\/(?:a|span|div)>/i.exec(block);
-    const author = authorMatch
-      ? authorMatch[1].replace(/<[^>]+>/g, '').trim()
+    // Skip non-comment divs that match the pattern but lack an id="comment_..."
+    const idMatch = /\bid="comment_(\d+)"/.exec(openingTag);
+    if (!idMatch) continue;
+    const postId = idMatch[1];
+
+    // Author: first anchor/bdi inside .commentthread_comment_author
+    const authorBlockMatch = /class="[^"]*commentthread_comment_author[^"]*"[^>]*>([\s\S]*?)<\/div>/i.exec(block);
+    const author = authorBlockMatch
+      ? authorBlockMatch[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim()
       : '';
 
     // Reply body: .commentthread_comment_text
     const bodyMatch = /class="[^"]*commentthread_comment_text[^"]*"[^>]*>([\s\S]*?)<\/div>/i.exec(block);
     const text = bodyMatch ? htmlToPlainText(bodyMatch[1]) : '';
 
-    // Timestamp: data-timestamp attribute anywhere in the block
+    // Timestamp: data-timestamp attribute on the timestamp span
     const tsMatch  = /data-timestamp="(\d+)"/i.exec(block);
     const postedAt = tsMatch
       ? new Date(parseInt(tsMatch[1], 10) * 1000).toISOString()
