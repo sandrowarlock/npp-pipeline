@@ -123,12 +123,24 @@ function parseDiscussionsPage(html) {
   // We match from that opening tag to the closing </div> of the block.
   // Steam's HTML is not perfectly nested, so we look for the key fields
   // within a generous window after each topic container opening.
-  const topicPattern = /<div[^>]+data-gidforumtopic="(\d+)"[^>]*>([\s\S]*?)(?=<div[^>]+data-gidforumtopic=|$)/g;
+  // Capture the full opening tag (group 1) to read class attributes, plus the
+  // inner block (group 2) for all child-element fields.
+  const topicPattern = /(<div[^>]+data-gidforumtopic="(\d+)"[^>]*>)([\s\S]*?)(?=<div[^>]+data-gidforumtopic=|$)/g;
 
   let match;
   while ((match = topicPattern.exec(html)) !== null) {
-    const topicId = match[1];
-    const block   = match[2];
+    const openingTag = match[1];
+    const topicId    = match[2];
+    const block      = match[3];
+
+    // Pinned / locked: detected from CSS classes on the topic container div.
+    // Examples:
+    //   class="forum_topic unread sticky"         → pinned
+    //   class="forum_topic unread locked sticky"  → pinned + locked
+    const classMatch = /class="([^"]*)"/i.exec(openingTag);
+    const classList  = classMatch ? classMatch[1] : '';
+    const isPinned   = /\bsticky\b/.test(classList);
+    const isLocked   = /\blocked\b/.test(classList);
 
     // Title: .forum_topic_name
     const titleMatch = /class="forum_topic_name[^"]*"[^>]*>([\s\S]*?)<\/a>/i.exec(block);
@@ -150,12 +162,12 @@ function parseDiscussionsPage(html) {
       : null;
 
     // Opening post body: data-tooltip-forum attribute on the topic container
-    const tooltipMatch = /data-tooltip-forum="([^"]*)"/i.exec(match[0]);
+    const tooltipMatch = /data-tooltip-forum="([^"]*)"/i.exec(openingTag);
     const openingPostBody = tooltipMatch
       ? htmlToPlainText(tooltipMatch[1])
       : '';
 
-    topics.push({ topicId, title, authorName, replyCount, lastPostedAt, openingPostBody });
+    topics.push({ topicId, title, authorName, replyCount, lastPostedAt, openingPostBody, isPinned, isLocked });
   }
 
   return topics;
@@ -279,8 +291,10 @@ async function main() {
         }
 
         for (const t of pageTopics) {
-          // Check 30-day threshold against last_posted_at
-          if (t.lastPostedAt) {
+          // Check 30-day threshold against last_posted_at.
+          // Pinned topics are exempt — they can be years old but always appear
+          // at the top of every page, so they must never trigger pagination stop.
+          if (!t.isPinned && t.lastPostedAt) {
             const lastMs = new Date(t.lastPostedAt).getTime();
             if (lastMs < cutoffMs) {
               stopReason = '30-day threshold';
@@ -309,8 +323,8 @@ async function main() {
             reply_count:        t.replyCount,
             opening_post_body:  t.openingPostBody,
             last_posted_at:     t.lastPostedAt,
-            is_pinned:          false,
-            is_locked:          false,
+            is_pinned:          t.isPinned,
+            is_locked:          t.isLocked,
             scraped_date:       today,
             needs_reply_scrape: needsReplyScrape,
           });
