@@ -78,6 +78,30 @@ function htmlToPlainText(html) {
 // HTML parsing
 // ---------------------------------------------------------------------------
 
+// Find the full inner content of a div whose opening tag was matched by
+// openMatch (a regex match object with .index and [0]).  Tracks nesting depth
+// so nested divs (e.g. bb_quoteauthor inside commentthread_comment_text) are
+// included rather than cutting off at the first </div>.
+function extractDivContent(html, openMatch) {
+  const start = openMatch.index + openMatch[0].length;
+  let depth = 1;
+  let pos   = start;
+  while (pos < html.length && depth > 0) {
+    const nextOpen  = html.indexOf('<div', pos);
+    const nextClose = html.indexOf('</div>', pos);
+    if (nextClose === -1) break;
+    if (nextOpen !== -1 && nextOpen < nextClose) {
+      depth++;
+      pos = nextOpen + 4;
+    } else {
+      depth--;
+      if (depth === 0) return html.slice(start, nextClose);
+      pos = nextClose + 6;
+    }
+  }
+  return html.slice(start);
+}
+
 // Parse all reply blocks from a Steam discussion thread page.
 // Returns an array of reply objects.
 //
@@ -126,8 +150,11 @@ function parseThreadPage(html) {
       : '';
 
     // Reply body: .commentthread_comment_text
-    const bodyMatch = /class="[^"]*commentthread_comment_text[^"]*"[^>]*>([\s\S]*?)<\/div>/i.exec(block);
-    const text = bodyMatch ? htmlToPlainText(bodyMatch[1]) : '';
+    // Uses extractDivContent (depth-tracking) so quoted replies — which contain
+    // nested divs like bb_quoteauthor — are captured in full rather than being
+    // cut off at the first inner </div>.
+    const bodyOpenMatch = /class="[^"]*commentthread_comment_text[^"]*"[^>]*>/i.exec(block);
+    const text = bodyOpenMatch ? htmlToPlainText(extractDivContent(block, bodyOpenMatch)) : '';
 
     // Timestamp: data-timestamp attribute on the timestamp span
     const tsMatch  = /data-timestamp="(\d+)"/i.exec(block);
@@ -233,7 +260,7 @@ async function main() {
     const seenPostIds  = new Set();
     const allParsed    = [];
     let   pagesFetched = 0;
-    let   accessError  = null;   // 'agegate' | 'login' | 'fetchfail'
+    let   accessError  = null;   // 'agegate' | 'login' | 'fetchfail' | 'notfound'
 
     for (let page = 1; allParsed.length < MAX_REPLIES; page++) {
       if (page > 1) await sleep(BETWEEN_PAGES_MS);
@@ -264,6 +291,16 @@ async function main() {
         accessError = 'login';
         break;
       }
+      // Detect deleted / non-existent threads — clear the flag so they are
+      // not retried (unlike access errors, which are transient).
+      if (
+        html.includes('<title>Steam Community :: Error</title>') ||
+        html.includes('The specified thread does not exist')
+      ) {
+        console.log(`  [${topic_id}] Thread not found — skipping`);
+        accessError = 'notfound';
+        break;
+      }
 
       pagesFetched++;
       const parsed  = parseThreadPage(html);
@@ -285,8 +322,7 @@ async function main() {
       if (newSeen < 15) break;
     }
 
-    // Surface access errors as skips so the flag is NOT cleared and the topic
-    // will be retried on the next run.
+    // Transient access errors — do NOT clear the flag; retry on next run.
     if (accessError === 'agegate' || accessError === 'login') {
       topicsSkipped++;
       continue;
@@ -295,6 +331,11 @@ async function main() {
       topicsFailed++;
       continue;
     }
+    // Thread permanently gone — fall through to flag-clearing so it is not
+    // retried, but skip the upsert.
+    if (accessError === 'notfound') {
+      // jump past upsert; flag-clearing code below handles the rest
+    } else {
 
     // Expected reply count includes the opening post (reply_count + 1 posts total)
     const expected = reply_count + 1;
@@ -329,7 +370,8 @@ async function main() {
         topicsFailed++;
         continue;
       }
-    }
+    } // end if/else allParsed
+    } // end else (accessError !== 'notfound')
 
     // Clear needs_reply_scrape flag so this topic is skipped on the next run
     // unless steam-discussions flags it again due to new activity.
