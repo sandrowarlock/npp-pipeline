@@ -93,30 +93,30 @@ function htmlToPlainText(html) {
 // The opening post (forum_op) uses the same id="comment_..." pattern but has
 // an additional class "forum_op" — we skip it since its content is already
 // stored in steam_discussions.opening_post_body.
+//
+// IMPORTANT: We split on id="comment_\d+" rather than on the class name
+// "commentthread_comment", because child divs (_content, _author, _text) all
+// share that class prefix and would cause the class-based lookahead to cut off
+// after the first child div, leaving the captured block empty.
 function parseThreadPage(html) {
   const results = [];
 
-  // Match every commentthread_comment div. Capture:
-  //   group 1 — full opening tag (for class inspection and id extraction)
-  //   group 2 — inner block content
-  const blockPattern = /(<div[^>]+class="[^"]*commentthread_comment[^"]*"[^>]*>)([\s\S]*?)(?=<div[^>]+class="[^"]*commentthread_comment[^"]*"|$)/g;
+  // Split on outer comment containers identified by id="comment_{digits}".
+  // Child divs do not carry this attribute, so the split is unambiguous.
+  const blockPattern = /(<div[^>]+id="comment_(\d+)"[^>]*>)([\s\S]*?)(?=<div[^>]+id="comment_\d+"|$)/g;
 
   let match;
   while ((match = blockPattern.exec(html)) !== null) {
     const openingTag = match[1];
-    const block      = match[2];
+    const postId     = match[2];
+    const block      = match[3];
 
     // Skip the opening post — identified by the forum_op class.
     const classMatch = /class="([^"]*)"/i.exec(openingTag);
     const classList  = classMatch ? classMatch[1] : '';
     if (/\bforum_op\b/.test(classList)) continue;
 
-    // Skip non-comment divs that match the pattern but lack an id="comment_..."
-    const idMatch = /\bid="comment_(\d+)"/.exec(openingTag);
-    if (!idMatch) continue;
-    const postId = idMatch[1];
-
-    // Author: first anchor/bdi inside .commentthread_comment_author
+    // Author: content of .commentthread_comment_author (strip inner tags)
     const authorBlockMatch = /class="[^"]*commentthread_comment_author[^"]*"[^>]*>([\s\S]*?)<\/div>/i.exec(block);
     const author = authorBlockMatch
       ? authorBlockMatch[1].replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim()
