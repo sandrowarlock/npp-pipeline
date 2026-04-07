@@ -303,11 +303,16 @@ async function main() {
           break pageLoop;
         }
 
-        // Detect login redirect — page title is "Sign In" meaning Steam redirected
-        // to the login page rather than serving the discussions hub.
+        // Detect login wall — two distinct cases:
+        //   1. Steam redirects to the login page (title is "Sign In")
+        //   2. Steam shows an error page with an inline login-required message
+        //      e.g. "You must be logged in to view this Community Hub"
         // Note: do NOT check for "login/home" in body — that string appears in the
         // nav header of every public Steam page for unauthenticated users.
-        if (html.includes('<title>Sign In')) {
+        if (
+          html.includes('<title>Sign In') ||
+          html.includes('You must be logged in to view this Community Hub')
+        ) {
           console.warn(`  Login required for ${name} — skipping`);
           break pageLoop;
         }
