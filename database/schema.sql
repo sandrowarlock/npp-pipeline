@@ -250,16 +250,17 @@ CREATE TABLE IF NOT EXISTS youtube_transcripts (
 -- Written by the steam-discussions and steam-discussions-re-search workflows.
 -- -----------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS steam_discussions (
-    topic_id            TEXT            PRIMARY KEY,
-    app_id              INTEGER         REFERENCES games_static (app_id),
-    title               TEXT,
-    author_name         TEXT,
-    reply_count         INTEGER,
-    opening_post_body   TEXT,
-    last_posted_at      TIMESTAMPTZ,
-    is_pinned           BOOLEAN,
-    is_locked           BOOLEAN,
-    scraped_date        DATE
+    topic_id              TEXT            PRIMARY KEY,
+    app_id                INTEGER         REFERENCES games_static (app_id),
+    title                 TEXT,
+    author_name           TEXT,
+    reply_count           INTEGER,
+    opening_post_body     TEXT,
+    last_posted_at        TIMESTAMPTZ,
+    is_pinned             BOOLEAN,
+    is_locked             BOOLEAN,
+    scraped_date          DATE,
+    needs_reply_scrape    BOOLEAN         DEFAULT FALSE
 );
 
 
