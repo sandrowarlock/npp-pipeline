@@ -51,11 +51,17 @@ const BETWEEN_PAGES_MS = 1_000;
 const BETWEEN_GAMES_MS = 2_000;
 
 // Browser-like request headers so Steam serves the page rather than blocking.
-const STEAM_HEADERS = {
-  'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-  'Accept-Language': 'en-US,en;q=0.9',
-  'Cookie':          'birthtime=0; lastagecheckage=1-January-1990; mature_content=1',
-};
+// Built per-game so wants_mature_content_apps can be set to the current app_id.
+// Two separate age-gate cookies are required:
+//   - birthtime + lastagecheckage  → store page age gate
+//   - wants_mature_content_apps    → community hub age gate (different system)
+function steamHeaders(appId) {
+  return {
+    'User-Agent':      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Cookie':          `birthtime=0; lastagecheckage=1-January-1990; mature_content=1; wants_mature_content_apps=${appId}`,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -280,8 +286,20 @@ async function main() {
           .replace('{appId}', app_id)
           .replace('{page}', page);
 
-        const response = await fetchWithRetry(url, { headers: STEAM_HEADERS });
+        const response = await fetchWithRetry(url, { headers: steamHeaders(app_id) });
         const html     = await response.text();
+
+        // Detect age gate — Steam returned a content-check page instead of discussions.
+        if (html.includes('contentcheck_desc_ctn')) {
+          console.warn(`  Age gate not bypassed for ${name} — may need login`);
+          break pageLoop;
+        }
+
+        // Detect login redirect — Steam requires an account session for this hub.
+        if (html.includes('login/home')) {
+          console.warn(`  Login required for ${name} — skipping`);
+          break pageLoop;
+        }
 
         const pageTopics = parseDiscussionsPage(html);
 
