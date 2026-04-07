@@ -92,10 +92,11 @@ function parseThreadPage(html) {
     const postId     = match[2];
     const block      = match[3];
 
-    // Identify the opening post by the forum_op class on its container div.
-    const classMatch    = /class="([^"]*)"/i.exec(openingTag);
-    const classList     = classMatch ? classMatch[1] : '';
-    const isOpeningPost = /\bforum_op\b/.test(classList);
+    // Skip the opening post — identified by the forum_op class on the container.
+    // It is already stored in steam_discussions.opening_post_body.
+    const classMatch = /class="([^"]*)"/i.exec(openingTag);
+    const classList  = classMatch ? classMatch[1] : '';
+    if (/\bforum_op\b/.test(classList)) continue;
 
     // Author: try forum_comment_author first, fall back to commentthread variant
     const authorMatch =
@@ -115,7 +116,7 @@ function parseThreadPage(html) {
       ? new Date(parseInt(tsMatch[1], 10) * 1000).toISOString()
       : null;
 
-    results.push({ postId, author, text, postedAt, isOpeningPost });
+    results.push({ postId, author, text, postedAt });
   }
 
   return results;
@@ -237,7 +238,8 @@ async function main() {
       console.log(`  [${topic_id}] "${title}": no posts parsed`);
       // Still clear the flag so we don't re-attempt a page that returned nothing
     } else {
-      // Build rows for steam_discussion_replies
+      // Build rows for steam_discussion_replies — opening posts already filtered
+      // out inside parseThreadPage, so every entry here is a genuine reply.
       const replyRows = parsed.map(p => ({
         comment_id:   p.postId,
         topic_id,
