@@ -35,8 +35,10 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-const STEAM_TOPIC_URL  = 'https://steamcommunity.com/app/{appId}/discussions/0/{topicId}/';
+const STEAM_TOPIC_URL   = 'https://steamcommunity.com/app/{appId}/discussions/0/{topicId}/';
 const BETWEEN_TOPICS_MS = 2_000;
+const BETWEEN_PAGES_MS  = 1_000;
+const MAX_REPLIES       = 500;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -217,44 +219,85 @@ async function main() {
       await sleep(BETWEEN_TOPICS_MS);
     }
 
-    const url = STEAM_TOPIC_URL
+    const baseUrl = STEAM_TOPIC_URL
       .replace('{appId}',   app_id)
       .replace('{topicId}', topic_id);
 
-    let html;
-    try {
-      const response = await fetchWithRetry(url, { headers: steamHeaders(app_id) });
-      html = await response.text();
-    } catch (err) {
-      console.error(`  [${topic_id}] Fetch failed: ${err.message}`);
+    // Paginate through thread pages (?ctp=1, ?ctp=2, …) accumulating all
+    // replies before upserting.  Steam shows ~15 replies per page.  We stop
+    // when a page yields no new reply IDs or when MAX_REPLIES is reached.
+    const seenPostIds  = new Set();
+    const allParsed    = [];
+    let   pagesFetched = 0;
+    let   accessError  = null;   // 'agegate' | 'login' | 'fetchfail'
+
+    for (let page = 1; allParsed.length < MAX_REPLIES; page++) {
+      if (page > 1) await sleep(BETWEEN_PAGES_MS);
+
+      const url = page === 1 ? baseUrl : `${baseUrl}?ctp=${page}`;
+
+      let html;
+      try {
+        const response = await fetchWithRetry(url, { headers: steamHeaders(app_id) });
+        html = await response.text();
+      } catch (err) {
+        console.error(`  [${topic_id}] Fetch failed (page ${page}): ${err.message}`);
+        accessError = 'fetchfail';
+        break;
+      }
+
+      // Detect access blocks — same checks as steam-discussions.js
+      if (html.includes('contentcheck_desc_ctn')) {
+        console.warn(`  [${topic_id}] Age gate not bypassed — skipping`);
+        accessError = 'agegate';
+        break;
+      }
+      if (
+        html.includes('<title>Sign In') ||
+        html.includes('You must be logged in to view this Community Hub')
+      ) {
+        console.warn(`  [${topic_id}] Login required — skipping`);
+        accessError = 'login';
+        break;
+      }
+
+      pagesFetched++;
+      const parsed  = parseThreadPage(html);
+      let   newSeen = 0;
+
+      for (const p of parsed) {
+        if (!seenPostIds.has(p.postId)) {
+          seenPostIds.add(p.postId);
+          allParsed.push(p);
+          newSeen++;
+        }
+      }
+
+      // Stop paginating when a page adds nothing new (end of thread reached)
+      if (newSeen === 0) break;
+    }
+
+    // Surface access errors as skips so the flag is NOT cleared and the topic
+    // will be retried on the next run.
+    if (accessError === 'agegate' || accessError === 'login') {
+      topicsSkipped++;
+      continue;
+    }
+    if (accessError === 'fetchfail') {
       topicsFailed++;
       continue;
     }
 
-    // Detect access blocks — same checks as steam-discussions.js
-    if (html.includes('contentcheck_desc_ctn')) {
-      console.warn(`  [${topic_id}] Age gate not bypassed — skipping`);
-      topicsSkipped++;
-      continue;
-    }
-    if (
-      html.includes('<title>Sign In') ||
-      html.includes('You must be logged in to view this Community Hub')
-    ) {
-      console.warn(`  [${topic_id}] Login required — skipping`);
-      topicsSkipped++;
-      continue;
-    }
+    // Expected reply count includes the opening post (reply_count + 1 posts total)
+    const expected = reply_count + 1;
 
-    const parsed = parseThreadPage(html);
-
-    if (parsed.length === 0) {
-      console.log(`  [${topic_id}] "${title}": no posts parsed`);
+    if (allParsed.length === 0) {
+      console.log(`  [${topic_id}] "${title}": ${pagesFetched} page(s), 0 replies written (expected ~${expected})`);
       // Still clear the flag so we don't re-attempt a page that returned nothing
     } else {
       // Build rows for steam_discussion_replies — opening posts already filtered
       // out inside parseThreadPage, so every entry here is a genuine reply.
-      const replyRows = parsed.map(p => ({
+      const replyRows = allParsed.map(p => ({
         comment_id:   p.postId,
         topic_id,
         app_id,
@@ -272,7 +315,7 @@ async function main() {
           'comment_id'
         );
         totalReplies += written;
-        console.log(`  [${topic_id}] "${title}": ${written} post(s) written (expected ~${reply_count + 1})`);
+        console.log(`  [${topic_id}] "${title}": ${pagesFetched} page(s), ${written} replies written (expected ~${expected})`);
       } catch (err) {
         console.error(`  [${topic_id}] Upsert failed: ${err.message}`);
         topicsFailed++;
