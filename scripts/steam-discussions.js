@@ -277,11 +277,14 @@ async function main() {
     if (gamesProcessed + gamesFailed > 0) await sleep(BETWEEN_GAMES_MS);
 
     const knownTopics = existingTopics.get(app_id);
+    const isFirstRun  = knownTopics.size === 0;
     const gameRows    = [];
 
     let page        = 1;
     let stopReason  = 'no topics';
     let hitCap      = false;
+
+    console.log(`  ${name} (${app_id}): ${isFirstRun ? 'first run — no 30-day cutoff' : 'subsequent run — 30-day cutoff active'}`);
 
     try {
       pageLoop: while (true) {
@@ -318,9 +321,10 @@ async function main() {
 
         for (const t of pageTopics) {
           // Check 30-day threshold against last_posted_at.
-          // Pinned topics are exempt — they can be years old but always appear
+          // Skipped on first run so the full discussion history is collected.
+          // Pinned topics are always exempt — they can be years old but appear
           // at the top of every page, so they must never trigger pagination stop.
-          if (!t.isPinned && t.lastPostedAt) {
+          if (!isFirstRun && !t.isPinned && t.lastPostedAt) {
             const lastMs = new Date(t.lastPostedAt).getTime();
             if (lastMs < cutoffMs) {
               stopReason = '30-day threshold';
