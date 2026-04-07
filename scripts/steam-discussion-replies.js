@@ -224,8 +224,9 @@ async function main() {
       .replace('{topicId}', topic_id);
 
     // Paginate through thread pages (?ctp=1, ?ctp=2, …) accumulating all
-    // replies before upserting.  Steam shows ~15 replies per page.  We stop
-    // when a page yields no new reply IDs or when MAX_REPLIES is reached.
+    // replies before upserting.  Steam shows 15 replies per page.  We stop
+    // early when a page returns fewer than 15 replies (it's the last page),
+    // or when a page yields no new reply IDs, or when MAX_REPLIES is reached.
     const seenPostIds  = new Set();
     const allParsed    = [];
     let   pagesFetched = 0;
@@ -275,6 +276,10 @@ async function main() {
 
       // Stop paginating when a page adds nothing new (end of thread reached)
       if (newSeen === 0) break;
+
+      // Stop early if this page was not full — it must be the last page.
+      // Avoids fetching an unnecessary empty page N+1 for every topic.
+      if (newSeen < 15) break;
     }
 
     // Surface access errors as skips so the flag is NOT cleared and the topic
