@@ -34,11 +34,12 @@ if (!GAMALYTIC_API_KEY) {
 // Paths
 // ---------------------------------------------------------------------------
 const GRIFFIN_DIR = path.resolve(__dirname, '../griffin');
-const INPUT_CSV   = path.join(GRIFFIN_DIR, 'Steam_AppIDs_for_Listed_Games_-_Steam_AppIDs_for_Listed_Games.csv');
+const INPUT_CSV   = path.join(GRIFFIN_DIR, 'Steam_AppIDs_for_Listed_Games_-_Steam_AppIDs_for_Listed_Games.csv.csv');
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
+const TEST_MODE         = true;   // set to false for full run
 const BETWEEN_GAMES_MS  = 1_000;  // 1 second between games
 const BETWEEN_CALLS_MS  =   500;  // 500 ms between API calls within a game
 
@@ -173,16 +174,16 @@ async function fetchTagsAndName(appId) {
   return { name, tags };
 }
 
-// 4. Language distribution from Steam reviews summary
-async function fetchLanguages(appId) {
-  const url = `https://store.steampowered.com/appreviews/${appId}?json=1&filter=all&language=all&num_per_page=1&purchase_type=all`;
-  const res  = await fetchWithRetry(url);
+// 4. Region distribution from Gamalytic active-users-regions
+async function fetchRegions(appId) {
+  const url = `https://api.gamalytic.com/game/${appId}/active-users-regions`;
+  const res  = await fetchWithRetry(url, { headers: { 'api-key': GAMALYTIC_API_KEY } });
   const data = await res.json();
-  const langs = data?.query_summary?.languages;
-  if (!langs || typeof langs !== 'object') return [];
-  return Object.entries(langs).map(([language, review_count]) => ({
-    language,
-    review_count,
+  const split = data?.countrySplit;
+  if (!split || typeof split !== 'object') return [];
+  return Object.entries(split).map(([country_code, percentage]) => ({
+    country_code,
+    percentage,
   }));
 }
 
@@ -203,19 +204,25 @@ async function main() {
   console.log('Griffin data collector\n');
 
   // Read input
-  const games = parseInputCsv(INPUT_CSV);
-  console.log(`Loaded ${games.length} games from input CSV.\n`);
+  let games = parseInputCsv(INPUT_CSV);
+  console.log(`Loaded ${games.length} games from input CSV.`);
+  if (TEST_MODE) {
+    games = games.slice(0, 3);
+    console.log(`TEST_MODE: processing first ${games.length} games only.\n`);
+  } else {
+    console.log('');
+  }
 
   // Accumulators
   const dauRows       = [];   // [app_id, name, date, dau, mau]
   const wishlistRows  = [];   // [app_id, name, date, wishlists]
   const tagRows       = [];   // [app_id, name, tag1..tag20]
-  const languageRows  = [];   // [app_id, name, language, review_count]
+  const regionRows    = [];   // [app_id, name, country_code, percentage]
   const indexRows     = [];   // [app_id, name, current_dau, peak_dau, current_wishlists]
   const reviewsMap    = {};   // { appId: [text, ...] }
 
   // Failure tracking
-  const failed = { dau: [], wishlists: [], tags: [], languages: [], reviews: [] };
+  const failed = { dau: [], wishlists: [], tags: [], regions: [], reviews: [] };
 
   for (let i = 0; i < games.length; i++) {
     const { name: csvName, appId } = games[i];
@@ -223,7 +230,7 @@ async function main() {
 
     if (i > 0) await sleep(BETWEEN_GAMES_MS);
 
-    const status = { dau: '✗', wishlists: '✗', tags: '✗', languages: '✗', reviews: '✗' };
+    const status = { dau: '✗', wishlists: '✗', tags: '✗', regions: '✗', reviews: '✗' };
     let resolvedName = csvName;  // use CSV name as fallback
 
     // ---- 1. DAU history ----
@@ -284,16 +291,16 @@ async function main() {
 
     await sleep(BETWEEN_CALLS_MS);
 
-    // ---- 4. Language distribution ----
+    // ---- 4. Region distribution ----
     try {
-      const langs = await fetchLanguages(appId);
-      for (const { language, review_count } of langs) {
-        languageRows.push([appId, resolvedName, language, review_count]);
+      const regions = await fetchRegions(appId);
+      for (const { country_code, percentage } of regions) {
+        regionRows.push([appId, resolvedName, country_code, percentage]);
       }
-      status.languages = '✓';
+      status.regions = '✓';
     } catch (err) {
-      console.error(`  Languages failed: ${err.message}`);
-      failed.languages.push(csvName);
+      console.error(`  Regions failed: ${err.message}`);
+      failed.regions.push(csvName);
     }
 
     await sleep(BETWEEN_CALLS_MS);
@@ -312,7 +319,7 @@ async function main() {
     // ---- Index row ----
     indexRows.push([appId, resolvedName, currentDau, peakDau, currentWishlists]);
 
-    console.log(`${prefix}: DAU ${status.dau} wishlists ${status.wishlists} tags ${status.tags} languages ${status.languages} reviews ${status.reviews}`);
+    console.log(`${prefix}: DAU ${status.dau} wishlists ${status.wishlists} tags ${status.tags} regions ${status.regions} reviews ${status.reviews}`);
   }
 
   // ---------------------------------------------------------------------------
@@ -341,13 +348,13 @@ async function main() {
   writeCsv(path.join(GRIFFIN_DIR, 'tags.csv'), tagHeader, tagRows);
   console.log(`  tags.csv              — ${tagRows.length} rows`);
 
-  // 4. languages.csv
+  // 4. regions.csv
   writeCsv(
-    path.join(GRIFFIN_DIR, 'languages.csv'),
-    ['app_id', 'name', 'language', 'review_count'],
-    languageRows
+    path.join(GRIFFIN_DIR, 'regions.csv'),
+    ['app_id', 'name', 'country_code', 'percentage'],
+    regionRows
   );
-  console.log(`  languages.csv         — ${languageRows.length} rows`);
+  console.log(`  regions.csv           — ${regionRows.length} rows`);
 
   // 5. games_index.csv
   writeCsv(
@@ -372,13 +379,13 @@ async function main() {
   const n = games.length;
   console.log(`
 Collection complete.
-DAU: ${n - failed.dau.length}/${n} | Wishlists: ${n - failed.wishlists.length}/${n} | Tags: ${n - failed.tags.length}/${n} | Languages: ${n - failed.languages.length}/${n} | Reviews: ${n - failed.reviews.length}/${n}`);
+DAU: ${n - failed.dau.length}/${n} | Wishlists: ${n - failed.wishlists.length}/${n} | Tags: ${n - failed.tags.length}/${n} | Regions: ${n - failed.regions.length}/${n} | Reviews: ${n - failed.reviews.length}/${n}`);
 
-  if (failed.dau.length)       console.log(`  DAU failures:       ${failed.dau.join(', ')}`);
-  if (failed.wishlists.length) console.log(`  Wishlist failures:  ${failed.wishlists.join(', ')}`);
-  if (failed.tags.length)      console.log(`  Tag failures:       ${failed.tags.join(', ')}`);
-  if (failed.languages.length) console.log(`  Language failures:  ${failed.languages.join(', ')}`);
-  if (failed.reviews.length)   console.log(`  Review failures:    ${failed.reviews.join(', ')}`);
+  if (failed.dau.length)     console.log(`  DAU failures:      ${failed.dau.join(', ')}`);
+  if (failed.wishlists.length) console.log(`  Wishlist failures: ${failed.wishlists.join(', ')}`);
+  if (failed.tags.length)    console.log(`  Tag failures:      ${failed.tags.join(', ')}`);
+  if (failed.regions.length) console.log(`  Region failures:   ${failed.regions.join(', ')}`);
+  if (failed.reviews.length) console.log(`  Review failures:   ${failed.reviews.join(', ')}`);
 }
 
 main().catch(err => {
