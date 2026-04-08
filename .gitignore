@@ -4,3 +4,8 @@
 # Node
 node_modules/
 npm-debug.log*
+
+# Griffin genre study output files
+griffin/*.csv
+griffin/*.json
+!griffin/Steam_AppIDs_for_Listed_Games.csv
