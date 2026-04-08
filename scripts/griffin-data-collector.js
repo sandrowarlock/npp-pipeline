@@ -34,7 +34,7 @@ if (!GAMALYTIC_API_KEY) {
 // Paths
 // ---------------------------------------------------------------------------
 const GRIFFIN_DIR = path.resolve(__dirname, '../griffin');
-const INPUT_CSV   = path.join(GRIFFIN_DIR, 'Steam AppIDs for Listed Games - Steam AppIDs for Listed Games.csv');
+const INPUT_CSV   = path.join(GRIFFIN_DIR, 'Steam_AppIDs_for_Listed_Games_-_Steam_AppIDs_for_Listed_Games.csv');
 
 // ---------------------------------------------------------------------------
 // Constants
