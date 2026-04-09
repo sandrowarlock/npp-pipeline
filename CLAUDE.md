@@ -285,3 +285,6 @@ Individual replies within tracked Steam discussion threads.
 - Environment variables via process.env — never hardcoded
 - Add comments explaining business logic, not just what the code does
 - Keep each workflow script focused on one job
+
+## Git Commits
+Do not add "Co-authored-by" or any Claude/AI attribution to git commits. Write clean commit messages only.
