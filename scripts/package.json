@@ -4,6 +4,7 @@
   "description": "NPP Pipeline workflow scripts",
   "dependencies": {
     "@supabase/supabase-js": "^2.0.0",
-    "dotenv": "^17.4.0"
+    "dotenv": "^17.4.0",
+    "franc": "^5.0.0"
   }
 }
