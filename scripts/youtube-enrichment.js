@@ -1,14 +1,19 @@
 // youtube-enrichment.js
 // Workflow: youtube-enrichment
 //
-// Runs weekly and enriches tracked games with YouTube data:
+// Runs daily and enriches tracked games with YouTube data:
 // videos, comments, and transcripts.
 //
-// Core principle: only process games that haven't been searched in the last
-// 7 days, based on the most recent last_updated date in youtube_videos.
+// Game selection rules (Step 1):
+//   Rule 1 — New games (tracking_source = 'auto', first_seen_date = today):
+//            Always processed immediately, regardless of day-of-week batching.
+//   Rule 2 — Existing auto games: processed on a 7-day rotation keyed by
+//            (array index % 7 === day-of-week), spreading load across the week.
+//   Rule 3 — Non-auto games (e.g. griffin-genre-study): skipped entirely.
+//            These are handled by dedicated scripts.
 //
 // Steps:
-//   1. Get games to process (not searched within last 7 days)
+//   1. Get games to process (new auto games + today's re-search batch)
 //   2. Search YouTube for each game (100 units/call)
 //   3. Filter results with Claude API for relevance (~$0.001–0.003/game)
 //   4. Fetch video details in batches of 50 (1 unit/batch)
@@ -50,8 +55,8 @@ const YOUTUBE_COMMENTS_URL = 'https://www.googleapis.com/youtube/v3/commentThrea
 const TRANSCRIPT_API_URL   = 'https://transcriptapi.com/api/v2/youtube/transcript';
 const ANTHROPIC_API_URL    = 'https://api.anthropic.com/v1/messages';
 
-// Only process games whose youtube_videos rows are older than this many days.
-const STALE_DAYS = 7;
+// Tracking sources eligible for YouTube enrichment in this script.
+const AUTO_SOURCE = 'auto';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -146,8 +151,7 @@ async function filterWithClaude(game, videos) {
 // Main
 // ---------------------------------------------------------------------------
 async function main() {
-  const today     = new Date().toISOString().split('T')[0];
-  const staleDate = new Date(Date.now() - STALE_DAYS * 864e5).toISOString().split('T')[0];
+  const today = new Date().toISOString().split('T')[0];
 
   console.log(`youtube-enrichment — ${today}\n`);
 
@@ -160,66 +164,58 @@ async function main() {
   // -------------------------------------------------------------------------
   // Step 1 — Get games to process
   //
-  // Only process games whose most recent youtube_videos row is older than
-  // STALE_DAYS, or games that have never been searched (no rows at all).
+  // Rule 1: New auto games (first_seen_date = today) → always included.
+  // Rule 2: Existing auto games → day-of-week batch (index % 7 === dayOfWeek).
+  // Rule 3: Non-auto games (e.g. griffin-genre-study) → skipped entirely.
   // -------------------------------------------------------------------------
   console.log('Step 1: Loading games to process...');
 
-  let allGames;
+  const dayOfWeek = new Date().getDay(); // 0 = Sunday … 6 = Saturday
+
+  let allAutoGames;
+  let pipelineCandidateCount = 0;
+
   try {
     const { data, error } = await supabase
       .from('games_static')
-      .select('app_id, name, developer1, developer2, developer3, publisher1, publisher2, publisher3, short_description')
+      .select('app_id, name, first_seen_date, tracking_source, developer1, developer2, developer3, publisher1, publisher2, publisher3, short_description')
       .order('app_id', { ascending: true });
 
     if (error) throw new Error(error.message);
-    allGames = data || [];
+    const all = data || [];
+
+    // Count non-auto games so we can report them
+    pipelineCandidateCount = all.filter(g => g.tracking_source !== AUTO_SOURCE).length;
+
+    // Only work with auto-tracked games from here on
+    allAutoGames = all.filter(g => g.tracking_source === AUTO_SOURCE);
   } catch (err) {
     console.error(`Step 1 failed (reading games_static): ${err.message}`);
     process.exit(1);
   }
 
-  if (allGames.length === 0) {
-    console.log('No tracked games found. Exiting.');
-    process.exit(0);
-  }
+  // Rule 1 — New games: first_seen_date = today
+  const newGames      = allAutoGames.filter(g => g.first_seen_date === today);
 
-  const allAppIds = allGames.map(g => g.app_id);
+  // Rule 2 — Existing games: all auto games not seen today, batched by day-of-week
+  const existingGames = allAutoGames.filter(g => g.first_seen_date !== today);
+  const todaysBatch   = existingGames.filter((_, i) => i % 7 === dayOfWeek);
 
-  // Find the most recent last_updated per game from youtube_videos.
-  // A simple query is sufficient here — missing rows due to the 1,000-row
-  // default limit only causes a game to be re-processed unnecessarily,
-  // which is harmless since all writes are upserts.
-  const recentByAppId = new Map(); // app_id → most recent last_updated string
-  try {
-    const { data, error } = await supabase
-      .from('youtube_videos')
-      .select('app_id, last_updated')
-      .in('app_id', allAppIds);
+  // Combine — new games first, then today's re-search batch
+  const newAppIds = new Set(newGames.map(g => g.app_id));
+  const gamesToProcess = [
+    ...newGames,
+    ...todaysBatch.filter(g => !newAppIds.has(g.app_id)), // safety dedup
+  ];
 
-    if (error) throw new Error(error.message);
-
-    for (const row of (data || [])) {
-      const existing = recentByAppId.get(row.app_id);
-      if (!existing || row.last_updated > existing) {
-        recentByAppId.set(row.app_id, row.last_updated);
-      }
-    }
-  } catch (err) {
-    console.warn(`Step 1 warning (reading youtube_videos): ${err.message}`);
-    console.warn('Treating all games as unprocessed.');
-  }
-
-  const gamesToProcess = allGames.filter(g => {
-    const lastUpdated = recentByAppId.get(g.app_id);
-    return !lastUpdated || lastUpdated < staleDate;
-  });
-
-  const skipped = allGames.length - gamesToProcess.length;
-  console.log(`${gamesToProcess.length} game(s) to process, ${skipped} skipped (searched within last ${STALE_DAYS} days).`);
+  console.log(`Auto games total:        ${allAutoGames.length}`);
+  console.log(`  New (first seen today): ${newGames.length}`);
+  console.log(`  Re-search batch today:  ${todaysBatch.length} of ${existingGames.length} existing (day ${dayOfWeek}/7)`);
+  console.log(`  Pipeline candidates skipped: ${pipelineCandidateCount}`);
+  console.log(`Games to process this run: ${gamesToProcess.length}`);
 
   if (gamesToProcess.length === 0) {
-    console.log('All games are up to date. Exiting.');
+    console.log('Nothing to process today. Exiting.');
     process.exit(0);
   }
 
