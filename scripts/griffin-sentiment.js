@@ -34,10 +34,12 @@ if (!ANTHROPIC_API_KEY) {
 // ---------------------------------------------------------------------------
 // Paths
 // ---------------------------------------------------------------------------
-const GRIFFIN_DIR  = path.resolve(__dirname, '../griffin');
-const TAGS_CSV     = path.join(GRIFFIN_DIR, 'tags.csv');
-const REVIEWS_JSON = path.join(GRIFFIN_DIR, 'reviews.json');
-const OUTPUT_JSON  = path.join(GRIFFIN_DIR, 'roguelike_sentiment.json');
+const GRIFFIN_DIR        = path.resolve(__dirname, '../griffin');
+const TAGS_CSV           = path.join(GRIFFIN_DIR, 'tags.csv');
+const REVIEWS_JSON       = path.join(GRIFFIN_DIR, 'reviews.json');
+const OUTPUT_JSON        = path.join(GRIFFIN_DIR, 'roguelike_sentiment.json');
+const TRANSLATED_CHECKPOINT = path.join(GRIFFIN_DIR, 'roguelike_translated.json');
+const ANALYSIS_CHECKPOINT   = path.join(GRIFFIN_DIR, 'roguelike_analysis.json');
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -222,6 +224,10 @@ async function runPhase1(reviewEntries) {
   }
 
   console.log(`\nPhase 1 complete. Translated: ${translated} | Batches failed: ${failed}\n`);
+
+  // Save checkpoint so Phase 2 can resume without re-translating if credits run out
+  fs.writeFileSync(TRANSLATED_CHECKPOINT, JSON.stringify(reviewEntries, null, 2), 'utf8');
+  console.log(`Checkpoint saved → roguelike_translated.json\n`);
 }
 
 // ---------------------------------------------------------------------------
@@ -303,7 +309,12 @@ async function runPhase2a(reviewEntries) {
   console.log(`\nPhase 2a complete. Analyzed: ${totalAnalyzed} | Batches failed: ${failed}`);
   console.log(`Total raw theme strings: ${allThemes.length}\n`);
 
-  return { sentimentCounts, allThemes, totalAnalyzed };
+  // Save checkpoint so Phase 2b can resume without re-analyzing if credits run out
+  const analysisResult = { sentimentCounts, allThemes, totalAnalyzed };
+  fs.writeFileSync(ANALYSIS_CHECKPOINT, JSON.stringify(analysisResult, null, 2), 'utf8');
+  console.log(`Checkpoint saved → roguelike_analysis.json\n`);
+
+  return analysisResult;
 }
 
 // ---------------------------------------------------------------------------
@@ -379,29 +390,47 @@ async function main() {
   const roguelikeIds = loadRoguelikeAppIds(TAGS_CSV);
   console.log(`Found ${roguelikeIds.size} roguelike games.`);
 
-  console.log('Loading reviews from reviews.json...');
-  const allReviews   = JSON.parse(fs.readFileSync(REVIEWS_JSON, 'utf8'));
+  // ---- Phase 1: Translation (skip if checkpoint exists) ----
+  let reviewEntries;
+  let translatedCount;
 
-  const reviewEntries = [];
-  for (const appId of roguelikeIds) {
-    const texts = allReviews[appId];
-    if (!Array.isArray(texts) || texts.length === 0) continue;
-    for (const text of texts) {
-      if (text && text.trim()) {
-        reviewEntries.push({ appId, text: text.trim(), original_language: 'und', was_translated: false });
+  if (fs.existsSync(TRANSLATED_CHECKPOINT)) {
+    console.log(`\nCheckpoint found — loading translated reviews from roguelike_translated.json (skipping Phase 1)...`);
+    reviewEntries    = JSON.parse(fs.readFileSync(TRANSLATED_CHECKPOINT, 'utf8'));
+    translatedCount  = reviewEntries.filter(e => e.was_translated).length;
+    console.log(`Loaded ${reviewEntries.length} reviews (${translatedCount} previously translated)\n`);
+  } else {
+    console.log('Loading reviews from reviews.json...');
+    const allReviews = JSON.parse(fs.readFileSync(REVIEWS_JSON, 'utf8'));
+
+    reviewEntries = [];
+    for (const appId of roguelikeIds) {
+      const texts = allReviews[appId];
+      if (!Array.isArray(texts) || texts.length === 0) continue;
+      for (const text of texts) {
+        if (text && text.trim()) {
+          reviewEntries.push({ appId, text: text.trim(), original_language: 'und', was_translated: false });
+        }
       }
     }
+
+    console.log(`Total reviews: ${reviewEntries.length}\n`);
+    if (reviewEntries.length === 0) { console.log('Nothing to analyze. Exiting.'); process.exit(0); }
+
+    await runPhase1(reviewEntries);
+    translatedCount = reviewEntries.filter(e => e.was_translated).length;
   }
 
-  console.log(`Total reviews: ${reviewEntries.length}\n`);
-  if (reviewEntries.length === 0) { console.log('Nothing to analyze. Exiting.'); process.exit(0); }
+  // ---- Phase 2a: Analysis (skip if checkpoint exists) ----
+  let sentimentCounts, allThemes, totalAnalyzed;
 
-  // ---- Phase 1: Translation ----
-  await runPhase1(reviewEntries);
-  const translatedCount = reviewEntries.filter(e => e.was_translated).length;
-
-  // ---- Phase 2a: Analysis ----
-  const { sentimentCounts, allThemes, totalAnalyzed } = await runPhase2a(reviewEntries);
+  if (fs.existsSync(ANALYSIS_CHECKPOINT)) {
+    console.log(`Checkpoint found — loading analysis results from roguelike_analysis.json (skipping Phase 2a)...`);
+    ({ sentimentCounts, allThemes, totalAnalyzed } = JSON.parse(fs.readFileSync(ANALYSIS_CHECKPOINT, 'utf8')));
+    console.log(`Loaded: ${totalAnalyzed} analyzed | ${allThemes.length} theme strings\n`);
+  } else {
+    ({ sentimentCounts, allThemes, totalAnalyzed } = await runPhase2a(reviewEntries));
+  }
 
   // ---- Phase 2b: Aggregation ----
   let aggregation;
