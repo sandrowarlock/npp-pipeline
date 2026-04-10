@@ -324,23 +324,36 @@ async function runPhase2a(reviewEntries) {
 async function runPhase2b(allThemes, totalAnalyzed) {
   console.log('── Phase 2b: Theme aggregation ──\n');
 
-  // Build frequency map: "theme|language" → count
-  const themeFreq = {};
+  // Pre-aggregate: group by theme, summing counts and tracking per-language breakdown.
+  // This collapses 18k+ raw theme×language pairs into a compact per-theme summary
+  // that fits within Claude's 200k token context limit.
+  const themeMap = {}; // theme → { total, langs: { langCode → count } }
   for (const { theme, language } of allThemes) {
-    const key = `${theme}|||${language}`;
-    themeFreq[key] = (themeFreq[key] || 0) + 1;
+    if (!themeMap[theme]) themeMap[theme] = { total: 0, langs: {} };
+    themeMap[theme].total++;
+    themeMap[theme].langs[language] = (themeMap[theme].langs[language] || 0) + 1;
   }
 
-  // Format for the aggregation prompt
-  const themeLines = Object.entries(themeFreq)
-    .sort((a, b) => b[1] - a[1])
-    .map(([key, count]) => {
-      const [theme, lang] = key.split('|||');
-      return `"${theme}" | lang:${lang} | count:${count}`;
-    })
-    .join('\n');
+  // Sort by total count descending; drop singleton themes (noise) and cap at 600
+  // entries — each entry is ~20 tokens, so 600 ≈ 12k tokens, well within limits.
+  const MAX_THEMES = 600;
+  const topThemes = Object.entries(themeMap)
+    .filter(([, v]) => v.total >= 2)
+    .sort((a, b) => b[1].total - a[1].total)
+    .slice(0, MAX_THEMES);
 
-  console.log(`Sending ${Object.keys(themeFreq).length} distinct theme×language pairs to Claude for aggregation...`);
+  // Format: one line per theme with total count and top language breakdown
+  const themeLines = topThemes.map(([theme, { total, langs }]) => {
+    const langSummary = Object.entries(langs)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 5) // top 5 languages per theme is enough for skew detection
+      .map(([lang, n]) => `${lang}:${n}`)
+      .join(', ');
+    return `"${theme}" | total:${total} | langs:{${langSummary}}`;
+  }).join('\n');
+
+  console.log(`Distinct themes (≥2 mentions): ${Object.keys(themeMap).length}`);
+  console.log(`Sending top ${topThemes.length} themes to Claude for aggregation...`);
 
   const prompt =
     `Below is a list of theme strings extracted from roguelike game reviews across multiple languages.\n` +
@@ -351,7 +364,7 @@ async function runPhase2b(allThemes, totalAnalyzed) {
     `3. Identify if any category is disproportionately mentioned in a specific language — flag it if a theme appears more than 2x the average rate in one language group\n` +
     `4. Write a short paragraph (3-5 sentences) of insight for each major category\n\n` +
     `Total reviews analyzed: ${totalAnalyzed}\n\n` +
-    `Input — each line is: "{theme}" | lang:{language_code} | count:{N}\n\n` +
+    `Input — each line is: "{theme}" | total:{count} | langs:{lang:count,...}\n\n` +
     `${themeLines}\n\n` +
     `Return a JSON object:\n` +
     `{\n` +
