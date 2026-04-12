@@ -40,12 +40,12 @@ if (!ANTHROPIC_API_KEY) {
 // ---------------------------------------------------------------------------
 const GENRE_CONFIG = {
   roguelike: {
-    tags: new Set(['Roguelike', 'Roguelite', 'Action Roguelike']),
+    tags: new Set(['Roguelike', 'Roguelite', 'Action Roguelike', 'Roguelike Deckbuilder']),
     // Backward compat: if new-format cache doesn't exist, try the old filename
     legacyTranslatedCache: 'roguelike_translated.json',
   },
   deckbuilder: {
-    tags: new Set(['Deckbuilder', 'Deck Building', 'Card Game', 'Card Battler']),
+    tags: new Set(['Deckbuilder', 'Deckbuilding', 'Deck Building', 'Card Game', 'Card Battler', 'Roguelike Deckbuilder']),
   },
   metroidvania: {
     tags: new Set(['Metroidvania']),
