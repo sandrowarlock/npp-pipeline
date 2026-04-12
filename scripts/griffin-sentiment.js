@@ -1,25 +1,29 @@
 // griffin-sentiment.js
 //
-// Two-phase analysis of Steam reviews for roguelike games in the Griffin genre study.
+// Multi-phase sentiment analysis of Steam reviews for a given genre in the
+// Griffin genre study, using the Claude API.
 //
-// Phase 1 — Translation
-//   Detects language of each review using franc. Sends non-English reviews to
-//   Claude in batches of 20 for translation to English.
+// Usage (from scripts/ directory):
+//   node --env-file=../.env griffin-sentiment.js <genre>
 //
-// Phase 2 — Analysis
-//   Sends all translated reviews to Claude in batches of 50 for sentiment
-//   classification and open-ended thematic tagging. Then sends one final
-//   aggregation prompt to group themes and write per-category insights.
+// Supported genres: roguelike, deckbuilder, metroidvania
 //
-// Output: griffin/roguelike_sentiment.json
+// Phases:
+//   Phase 1  — Language detection (franc) + translation to English
+//   Phase 2a — Theme extraction per review (open-ended, no predefined list)
+//   Phase 2b — Theme-level sentiment scoring against global theme vocabulary
+//   Phase 2c — Aggregation: group themes into categories, compute insights
 //
-// Run from scripts/ directory:
-//   node --env-file=../.env griffin-sentiment.js
+// Checkpoint files (all in griffin/):
+//   {genre}_reviews_translated.json  — Phase 1 output (skip if exists)
+//   {genre}_themes_raw.json          — Phase 2a output (skip if exists)
+//   {genre}_theme_sentiments.json    — Phase 2b output (skip if exists)
+//   {genre}_sentiment.json           — Final output
 
 'use strict';
 
-const fs   = require('fs');
-const path = require('path');
+const fs    = require('fs');
+const path  = require('path');
 const franc = require('franc');
 
 // ---------------------------------------------------------------------------
@@ -32,26 +36,58 @@ if (!ANTHROPIC_API_KEY) {
 }
 
 // ---------------------------------------------------------------------------
+// Genre configuration
+// ---------------------------------------------------------------------------
+const GENRE_CONFIG = {
+  roguelike: {
+    tags: new Set(['Roguelike', 'Roguelite', 'Action Roguelike']),
+    // Backward compat: if new-format cache doesn't exist, try the old filename
+    legacyTranslatedCache: 'roguelike_translated.json',
+  },
+  deckbuilder: {
+    tags: new Set(['Deckbuilder', 'Deck Building', 'Card Game', 'Card Battler']),
+  },
+  metroidvania: {
+    tags: new Set(['Metroidvania']),
+  },
+};
+
+// Parse and validate the genre argument
+const genre = process.argv[2]?.toLowerCase();
+if (!genre || !GENRE_CONFIG[genre]) {
+  console.error(`Error: genre argument required. Supported: ${Object.keys(GENRE_CONFIG).join(', ')}`);
+  console.error(`Usage: node griffin-sentiment.js <genre>`);
+  process.exit(1);
+}
+
+const { tags: GENRE_TAGS, legacyTranslatedCache } = GENRE_CONFIG[genre];
+
+// ---------------------------------------------------------------------------
 // Paths
 // ---------------------------------------------------------------------------
-const GRIFFIN_DIR        = path.resolve(__dirname, '../griffin');
-const TAGS_CSV           = path.join(GRIFFIN_DIR, 'tags.csv');
-const REVIEWS_JSON       = path.join(GRIFFIN_DIR, 'reviews.json');
-const OUTPUT_JSON        = path.join(GRIFFIN_DIR, 'roguelike_sentiment.json');
-const TRANSLATED_CHECKPOINT = path.join(GRIFFIN_DIR, 'roguelike_translated.json');
-const ANALYSIS_CHECKPOINT   = path.join(GRIFFIN_DIR, 'roguelike_analysis.json');
+const GRIFFIN_DIR          = path.resolve(__dirname, '../griffin');
+const TAGS_CSV             = path.join(GRIFFIN_DIR, 'tags.csv');
+const REVIEWS_JSON         = path.join(GRIFFIN_DIR, 'reviews.json');
+const TRANSLATED_CACHE     = path.join(GRIFFIN_DIR, `${genre}_reviews_translated.json`);
+const LEGACY_TRANSLATED    = legacyTranslatedCache ? path.join(GRIFFIN_DIR, legacyTranslatedCache) : null;
+const THEMES_RAW           = path.join(GRIFFIN_DIR, `${genre}_themes_raw.json`);
+const THEME_SENTIMENTS     = path.join(GRIFFIN_DIR, `${genre}_theme_sentiments.json`);
+const OUTPUT_JSON          = path.join(GRIFFIN_DIR, `${genre}_sentiment.json`);
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
-const ANTHROPIC_API_URL    = 'https://api.anthropic.com/v1/messages';
-const MODEL                = 'claude-sonnet-4-20250514';
-const MAX_TOKENS           = 4096;
-const BETWEEN_CALLS_MS     = 500;
-const TRANSLATION_BATCH    = 20;
-const ANALYSIS_BATCH       = 50;
+const ANTHROPIC_API_URL = 'https://api.anthropic.com/v1/messages';
+const MODEL             = 'claude-sonnet-4-20250514';
+const MAX_TOKENS        = 4096;
+const BETWEEN_CALLS_MS  = 500;
+const TRANSLATION_BATCH = 20;
+const ANALYSIS_BATCH    = 50;
 
-const ROGUELIKE_TAGS = new Set(['Roguelike', 'Roguelite', 'Action Roguelike']);
+// Phase 2b: max themes in global list sent with each scoring batch.
+// Each theme ≈ 8 tokens; 250 themes ≈ 2k tokens — keeps prompts manageable.
+const MAX_GLOBAL_THEMES = 250;
+const MIN_THEME_FREQ    = 2; // drop themes that appear in fewer than N reviews
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -67,7 +103,7 @@ function stripFences(text) {
     .trim();
 }
 
-async function claudeCall(userContent) {
+async function claudeCall(userContent, maxTokens = MAX_TOKENS) {
   const response = await fetch(ANTHROPIC_API_URL, {
     method: 'POST',
     headers: {
@@ -77,7 +113,7 @@ async function claudeCall(userContent) {
     },
     body: JSON.stringify({
       model:      MODEL,
-      max_tokens: MAX_TOKENS,
+      max_tokens: maxTokens,
       messages:   [{ role: 'user', content: userContent }],
     }),
   });
@@ -101,10 +137,10 @@ function parseJsonResponse(text, context) {
 }
 
 // ---------------------------------------------------------------------------
-// CSV loader — returns Set of roguelike app_ids from tags.csv
+// Load genre app_ids from tags.csv
 // ---------------------------------------------------------------------------
-function loadRoguelikeAppIds(filePath) {
-  const content = fs.readFileSync(filePath, 'utf8');
+function loadGenreAppIds() {
+  const content = fs.readFileSync(TAGS_CSV, 'utf8');
   const lines   = content.trim().split('\n');
   const header  = lines[0].split(',');
 
@@ -118,31 +154,27 @@ function loadRoguelikeAppIds(filePath) {
     throw new Error('tags.csv missing expected columns (app_id, tag1..tag20)');
   }
 
-  const roguelikeIds = new Set();
+  const ids = new Set();
   for (const line of lines.slice(1)) {
     if (!line.trim()) continue;
     const cols  = line.split(',');
     const appId = cols[appIdIdx]?.trim();
     if (!appId) continue;
-    const isRoguelike = tagCols.some(i => ROGUELIKE_TAGS.has(cols[i]?.trim()));
-    if (isRoguelike) roguelikeIds.add(appId);
+    if (tagCols.some(i => GENRE_TAGS.has(cols[i]?.trim()))) ids.add(appId);
   }
 
-  return roguelikeIds;
+  return ids;
 }
 
 // ---------------------------------------------------------------------------
 // Phase 1 — Language detection + translation
 // ---------------------------------------------------------------------------
-
 function detectLanguage(text) {
-  // franc needs at least ~10 chars to be reliable; short reviews default to "und"
   if (!text || text.trim().length < 10) return 'und';
   return franc(text);
 }
 
 async function translateBatch(reviews) {
-  // reviews is an array of { index, text } — index used to re-align results
   const numbered = reviews
     .map((r, i) => `${i + 1}. ${r.text.replace(/\n+/g, ' ').slice(0, 800)}`)
     .join('\n');
@@ -163,79 +195,63 @@ async function translateBatch(reviews) {
     );
   }
 
-  return parsed; // array of translated strings, same order as input
+  return parsed;
 }
 
 async function runPhase1(reviewEntries) {
   console.log('\n── Phase 1: Language detection & translation ──\n');
 
-  // Detect language for every review
   for (const entry of reviewEntries) {
     entry.original_language = detectLanguage(entry.text);
-    // "und" = undetermined (too short) → treat as English, no translation needed
-    entry.was_translated = entry.original_language !== 'eng' && entry.original_language !== 'und';
+    entry.was_translated    = entry.original_language !== 'eng' && entry.original_language !== 'und';
   }
 
-  const toTranslate = reviewEntries.filter(e => e.was_translated);
-  const langBreakdown = {};
+  const toTranslate    = reviewEntries.filter(e => e.was_translated);
+  const langBreakdown  = {};
   for (const e of reviewEntries) {
     langBreakdown[e.original_language] = (langBreakdown[e.original_language] || 0) + 1;
   }
 
-  console.log(`Language breakdown (top 10):`);
+  console.log('Language breakdown (top 10):');
   Object.entries(langBreakdown)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, 10)
+    .sort((a, b) => b[1] - a[1]).slice(0, 10)
     .forEach(([lang, n]) => console.log(`  ${lang.padEnd(6)} ${n}`));
 
   console.log(`\nReviews needing translation: ${toTranslate.length} / ${reviewEntries.length}`);
 
   if (toTranslate.length === 0) {
-    console.log('No translation needed — all reviews in English or undetermined.\n');
-    return;
-  }
+    console.log('No translation needed.\n');
+  } else {
+    const totalBatches = Math.ceil(toTranslate.length / TRANSLATION_BATCH);
+    let translated = 0, failed = 0;
+    console.log(`Translating in ${totalBatches} batches of up to ${TRANSLATION_BATCH}...\n`);
 
-  const totalBatches  = Math.ceil(toTranslate.length / TRANSLATION_BATCH);
-  let   translated    = 0;
-  let   failed        = 0;
-
-  console.log(`Translating in ${totalBatches} batches of up to ${TRANSLATION_BATCH}...\n`);
-
-  for (let b = 0; b < totalBatches; b++) {
-    if (b > 0) await sleep(BETWEEN_CALLS_MS);
-
-    const slice = toTranslate.slice(b * TRANSLATION_BATCH, (b + 1) * TRANSLATION_BATCH);
-
-    try {
-      const results = await translateBatch(slice);
-      for (let i = 0; i < slice.length; i++) {
-        slice[i].text = results[i] ?? slice[i].text; // fallback to original on missing entry
+    for (let b = 0; b < totalBatches; b++) {
+      if (b > 0) await sleep(BETWEEN_CALLS_MS);
+      const slice = toTranslate.slice(b * TRANSLATION_BATCH, (b + 1) * TRANSLATION_BATCH);
+      try {
+        const results = await translateBatch(slice);
+        for (let i = 0; i < slice.length; i++) slice[i].text = results[i] ?? slice[i].text;
+        translated += slice.length;
+      } catch (err) {
+        console.error(`  Translation batch ${b + 1}/${totalBatches} failed: ${err.message}`);
+        failed++;
       }
-      translated += slice.length;
-    } catch (err) {
-      console.error(`  Translation batch ${b + 1}/${totalBatches} failed: ${err.message}`);
-      failed++;
-      // Keep original text — analysis will still run on it
+      if ((b + 1) % 20 === 0 || b + 1 === totalBatches) {
+        console.log(`  Batch ${b + 1}/${totalBatches} — ${translated} translated so far`);
+      }
     }
-
-    if ((b + 1) % 20 === 0 || b + 1 === totalBatches) {
-      console.log(`  Translation batch ${b + 1}/${totalBatches} — ${translated} reviews translated so far`);
-    }
+    console.log(`\nPhase 1 complete. Translated: ${translated} | Batches failed: ${failed}\n`);
   }
 
-  console.log(`\nPhase 1 complete. Translated: ${translated} | Batches failed: ${failed}\n`);
-
-  // Save checkpoint so Phase 2 can resume without re-translating if credits run out
-  fs.writeFileSync(TRANSLATED_CHECKPOINT, JSON.stringify(reviewEntries, null, 2), 'utf8');
-  console.log(`Checkpoint saved → roguelike_translated.json\n`);
+  fs.writeFileSync(TRANSLATED_CACHE, JSON.stringify(reviewEntries, null, 2), 'utf8');
+  console.log(`Checkpoint saved → ${genre}_reviews_translated.json\n`);
 }
 
 // ---------------------------------------------------------------------------
-// Phase 2a — Sentiment + open-ended theme analysis
+// Phase 2a — Theme extraction (open-ended, no sentiment in this pass)
 // ---------------------------------------------------------------------------
-
-async function analyzeBatch(reviews) {
-  // reviews: array of { text, original_language }
+async function extractThemesBatch(reviews, batchOffset) {
   const numbered = reviews
     .map((r, i) =>
       `${i + 1}. [lang: ${r.original_language}] ${r.text.replace(/\n+/g, ' ').slice(0, 600)}`
@@ -243,128 +259,249 @@ async function analyzeBatch(reviews) {
     .join('\n\n');
 
   const prompt =
-    `Below are Steam game reviews for roguelike games, translated to English.\n` +
-    `For each review, return a JSON array with one object per review containing:\n` +
-    `- "sentiment": "positive", "negative", or "mixed"\n` +
-    `- "themes": array of short theme strings describing what the review is actually about — use YOUR OWN WORDS, do not use a predefined list. Examples: "satisfying difficulty curve", "unfair RNG", "great build variety", "too short", "excellent soundtrack", "pay to win", "boring after 10 hours", "amazing co-op experience". Be specific and descriptive. Use 1-4 themes per review.\n` +
-    `- "language": the original_language code passed in\n\n` +
-    `Return ONLY the JSON array, no preamble.\n\n` +
+    `Below are Steam game reviews. For each review, extract 1-8 themes\n` +
+    `that describe what the reviewer is talking about. Use your own words,\n` +
+    `be specific. Do not use a predefined list.\n\n` +
+    `Return ONLY a JSON array, one object per review:\n` +
+    `[\n` +
+    `  { "themes": ["great build variety", "unfair RNG"], "language": "eng" },\n` +
+    `  ...\n` +
+    `]\n\n` +
     `Reviews:\n${numbered}`;
 
   const text   = await claudeCall(prompt);
-  const parsed = parseJsonResponse(text, 'analysis batch');
+  const parsed = parseJsonResponse(text, 'theme extraction batch');
 
-  if (!Array.isArray(parsed)) {
-    throw new Error(`Analysis returned non-array: ${text.slice(0, 200)}`);
-  }
+  if (!Array.isArray(parsed)) throw new Error(`Theme extraction returned non-array: ${text.slice(0, 200)}`);
 
-  return parsed;
+  // Attach global review_index to each result
+  return parsed.map((result, i) => ({
+    review_index: batchOffset + i,
+    themes:       (result.themes || []).map(t => t.toLowerCase().trim()).filter(Boolean),
+    language:     result.language ?? reviews[i]?.original_language ?? 'und',
+  }));
 }
 
 async function runPhase2a(reviewEntries) {
-  console.log('── Phase 2a: Sentiment & theme analysis ──\n');
+  console.log('── Phase 2a: Theme extraction ──\n');
 
   const totalBatches = Math.ceil(reviewEntries.length / ANALYSIS_BATCH);
-  console.log(`Analyzing ${reviewEntries.length} reviews in ${totalBatches} batches of up to ${ANALYSIS_BATCH}...\n`);
+  console.log(`Extracting themes from ${reviewEntries.length} reviews in ${totalBatches} batches...\n`);
 
-  const sentimentCounts = { positive: 0, negative: 0, mixed: 0 };
-  const allThemes       = []; // { theme: string, language: string }
-  let   totalAnalyzed   = 0;
-  let   failed          = 0;
+  const reviewThemeMap = []; // { review_index, themes, language }
+  let   totalProcessed = 0;
+  let   failed         = 0;
 
   for (let b = 0; b < totalBatches; b++) {
     if (b > 0) await sleep(BETWEEN_CALLS_MS);
 
-    const slice = reviewEntries.slice(b * ANALYSIS_BATCH, (b + 1) * ANALYSIS_BATCH);
+    const offset = b * ANALYSIS_BATCH;
+    const slice  = reviewEntries.slice(offset, offset + ANALYSIS_BATCH);
 
     try {
-      const results = await analyzeBatch(slice);
-
-      for (const result of results) {
-        const s = result.sentiment;
-        if (s === 'positive' || s === 'negative' || s === 'mixed') {
-          sentimentCounts[s]++;
-        }
-        const lang = result.language ?? 'und';
-        if (Array.isArray(result.themes)) {
-          for (const theme of result.themes) {
-            if (theme && typeof theme === 'string') {
-              allThemes.push({ theme: theme.toLowerCase().trim(), language: lang });
-            }
-          }
-        }
-      }
-
-      totalAnalyzed += results.length;
+      const results = await extractThemesBatch(slice, offset);
+      reviewThemeMap.push(...results);
+      totalProcessed += results.length;
     } catch (err) {
-      console.error(`  Analysis batch ${b + 1}/${totalBatches} failed: ${err.message}`);
+      console.error(`  Batch ${b + 1}/${totalBatches} failed: ${err.message}`);
       failed++;
     }
 
     if ((b + 1) % 10 === 0 || b + 1 === totalBatches) {
-      console.log(`  Batch ${b + 1}/${totalBatches} — ${totalAnalyzed} analyzed, ${allThemes.length} themes collected`);
+      const themeCount = reviewThemeMap.reduce((s, r) => s + r.themes.length, 0);
+      console.log(`  Batch ${b + 1}/${totalBatches} — ${totalProcessed} processed, ${themeCount} raw themes`);
     }
   }
 
-  console.log(`\nPhase 2a complete. Analyzed: ${totalAnalyzed} | Batches failed: ${failed}`);
-  console.log(`Total raw theme strings: ${allThemes.length}\n`);
+  // Build deduplicated global theme list with frequency counts
+  const themeFreq = {};
+  for (const { themes } of reviewThemeMap) {
+    for (const t of themes) {
+      themeFreq[t] = (themeFreq[t] || 0) + 1;
+    }
+  }
 
-  // Save checkpoint so Phase 2b can resume without re-analyzing if credits run out
-  const analysisResult = { sentimentCounts, allThemes, totalAnalyzed };
-  fs.writeFileSync(ANALYSIS_CHECKPOINT, JSON.stringify(analysisResult, null, 2), 'utf8');
-  console.log(`Checkpoint saved → roguelike_analysis.json\n`);
+  const allThemes = Object.keys(themeFreq); // full deduplicated list
+  const totalRawThemes = reviewThemeMap.reduce((s, r) => s + r.themes.length, 0);
 
-  return analysisResult;
+  console.log(`\nPhase 2a complete. Processed: ${totalProcessed} | Batches failed: ${failed}`);
+  console.log(`Unique themes: ${allThemes.length} | Raw theme mentions: ${totalRawThemes}\n`);
+
+  const checkpoint = { themes: allThemes, themeFreq, reviewThemeMap, totalProcessed };
+  fs.writeFileSync(THEMES_RAW, JSON.stringify(checkpoint, null, 2), 'utf8');
+  console.log(`Checkpoint saved → ${genre}_themes_raw.json\n`);
+
+  return checkpoint;
 }
 
 // ---------------------------------------------------------------------------
-// Phase 2b — Theme aggregation via final Claude call
+// Phase 2b — Theme-level sentiment scoring
 // ---------------------------------------------------------------------------
+async function scoreThemeSentimentBatch(reviews, globalThemesList) {
+  const themeListText = globalThemesList
+    .map((t, i) => `${i + 1}. ${t}`)
+    .join('\n');
 
-async function runPhase2b(allThemes, totalAnalyzed) {
-  console.log('── Phase 2b: Theme aggregation ──\n');
-
-  // Pre-aggregate: group by theme, summing counts and tracking per-language breakdown.
-  // This collapses 18k+ raw theme×language pairs into a compact per-theme summary
-  // that fits within Claude's 200k token context limit.
-  const themeMap = {}; // theme → { total, langs: { langCode → count } }
-  for (const { theme, language } of allThemes) {
-    if (!themeMap[theme]) themeMap[theme] = { total: 0, langs: {} };
-    themeMap[theme].total++;
-    themeMap[theme].langs[language] = (themeMap[theme].langs[language] || 0) + 1;
-  }
-
-  // Sort by total count descending; drop singleton themes (noise) and cap at 600
-  // entries — each entry is ~20 tokens, so 600 ≈ 12k tokens, well within limits.
-  const MAX_THEMES = 600;
-  const topThemes = Object.entries(themeMap)
-    .filter(([, v]) => v.total >= 2)
-    .sort((a, b) => b[1].total - a[1].total)
-    .slice(0, MAX_THEMES);
-
-  // Format: one line per theme with total count and top language breakdown
-  const themeLines = topThemes.map(([theme, { total, langs }]) => {
-    const langSummary = Object.entries(langs)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 5) // top 5 languages per theme is enough for skew detection
-      .map(([lang, n]) => `${lang}:${n}`)
-      .join(', ');
-    return `"${theme}" | total:${total} | langs:{${langSummary}}`;
-  }).join('\n');
-
-  console.log(`Distinct themes (≥2 mentions): ${Object.keys(themeMap).length}`);
-  console.log(`Sending top ${topThemes.length} themes to Claude for aggregation...`);
+  const numbered = reviews
+    .map((r, i) =>
+      `${i + 1}. [lang: ${r.original_language}] ${r.text.replace(/\n+/g, ' ').slice(0, 600)}`
+    )
+    .join('\n\n');
 
   const prompt =
-    `Below is a list of theme strings extracted from roguelike game reviews across multiple languages.\n` +
-    `Some themes are similar and should be grouped (e.g. "unfair RNG", "luck-based outcomes", "random feels cheap" are the same thing).\n\n` +
+    `Below are Steam game reviews and a global list of themes identified\n` +
+    `across all reviews.\n\n` +
+    `For each review, identify which themes from the global list are mentioned\n` +
+    `(directly or implicitly), and whether the reviewer feels positive, negative,\n` +
+    `or neutral about each one.\n\n` +
+    `Global themes:\n${themeListText}\n\n` +
+    `For each review return a JSON array of theme sentiments:\n` +
+    `[\n` +
+    `  {\n` +
+    `    "review_index": N,\n` +
+    `    "theme_sentiments": [\n` +
+    `      { "theme": "great build variety", "sentiment": "positive" },\n` +
+    `      { "theme": "unfair RNG", "sentiment": "negative" }\n` +
+    `    ]\n` +
+    `  },\n` +
+    `  ...\n` +
+    `]\n\n` +
+    `Only include themes that are actually present in the review.\n` +
+    `Return ONLY the JSON array.\n\n` +
+    `Reviews:\n${numbered}`;
+
+  const text   = await claudeCall(prompt);
+  const parsed = parseJsonResponse(text, 'theme sentiment batch');
+
+  if (!Array.isArray(parsed)) throw new Error(`Sentiment scoring returned non-array: ${text.slice(0, 200)}`);
+  return parsed;
+}
+
+async function runPhase2b(reviewEntries, phase2aResult) {
+  console.log('── Phase 2b: Theme-level sentiment scoring ──\n');
+
+  const { themeFreq } = phase2aResult;
+
+  // Build the global theme list: filter by min frequency, sort by freq desc, cap
+  const globalThemesList = Object.entries(themeFreq)
+    .filter(([, freq]) => freq >= MIN_THEME_FREQ)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, MAX_GLOBAL_THEMES)
+    .map(([theme]) => theme);
+
+  const globalThemeSet = new Set(globalThemesList);
+
+  console.log(`Global theme vocabulary: ${globalThemesList.length} themes (freq ≥ ${MIN_THEME_FREQ}, capped at ${MAX_GLOBAL_THEMES})`);
+  console.log(`Scoring ${reviewEntries.length} reviews in batches of ${ANALYSIS_BATCH}...\n`);
+
+  const totalBatches = Math.ceil(reviewEntries.length / ANALYSIS_BATCH);
+
+  // Accumulators
+  // Per theme: { positive, negative, neutral, total, langs: { langCode: count } }
+  const themeSentimentCounts = {};
+  for (const t of globalThemesList) {
+    themeSentimentCounts[t] = { positive: 0, negative: 0, neutral: 0, total: 0, langs: {} };
+  }
+
+  // Per-review majority sentiment (for top-level positive/negative/mixed counts)
+  const reviewSentiments = []; // 'positive' | 'negative' | 'mixed'
+
+  let totalScored = 0;
+  let failed      = 0;
+
+  for (let b = 0; b < totalBatches; b++) {
+    if (b > 0) await sleep(BETWEEN_CALLS_MS);
+
+    const offset = b * ANALYSIS_BATCH;
+    const slice  = reviewEntries.slice(offset, offset + ANALYSIS_BATCH);
+
+    try {
+      const results = await scoreThemeSentimentBatch(slice, globalThemesList);
+
+      for (let i = 0; i < slice.length; i++) {
+        const reviewResult = results.find(r => r.review_index === i) ?? results[i];
+        const lang         = slice[i].original_language ?? 'und';
+        const sentiments   = reviewResult?.theme_sentiments ?? [];
+
+        let pos = 0, neg = 0, neu = 0;
+        for (const { theme, sentiment } of sentiments) {
+          const normTheme = theme?.toLowerCase().trim();
+          if (!normTheme || !globalThemeSet.has(normTheme)) continue;
+          const entry = themeSentimentCounts[normTheme];
+          if (!entry) continue;
+          const s = sentiment?.toLowerCase();
+          if (s === 'positive') { entry.positive++; pos++; }
+          else if (s === 'negative') { entry.negative++; neg++; }
+          else { entry.neutral++; neu++; }
+          entry.total++;
+          entry.langs[lang] = (entry.langs[lang] || 0) + 1;
+        }
+
+        // Review-level overall sentiment: majority vote
+        if (pos > neg && pos > neu)       reviewSentiments.push('positive');
+        else if (neg > pos && neg > neu)  reviewSentiments.push('negative');
+        else if (pos === 0 && neg === 0)  reviewSentiments.push('mixed'); // no themes matched
+        else                              reviewSentiments.push('mixed');
+      }
+
+      totalScored += slice.length;
+    } catch (err) {
+      console.error(`  Batch ${b + 1}/${totalBatches} failed: ${err.message}`);
+      failed++;
+      // Fill missing reviews with 'mixed' to keep counts aligned
+      for (let i = 0; i < slice.length; i++) reviewSentiments.push('mixed');
+    }
+
+    if ((b + 1) % 10 === 0 || b + 1 === totalBatches) {
+      const scored = Object.values(themeSentimentCounts).reduce((s, t) => s + t.total, 0);
+      console.log(`  Batch ${b + 1}/${totalBatches} — ${totalScored} reviews scored, ${scored} theme sentiments recorded`);
+    }
+  }
+
+  console.log(`\nPhase 2b complete. Scored: ${totalScored} | Batches failed: ${failed}\n`);
+
+  const checkpoint = { globalThemesList, themeSentimentCounts, reviewSentiments, totalScored };
+  fs.writeFileSync(THEME_SENTIMENTS, JSON.stringify(checkpoint, null, 2), 'utf8');
+  console.log(`Checkpoint saved → ${genre}_theme_sentiments.json\n`);
+
+  return checkpoint;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2c — Aggregation: group themes into canonical categories
+// ---------------------------------------------------------------------------
+async function runPhase2c(phase2bResult, totalReviews) {
+  console.log('── Phase 2c: Category aggregation ──\n');
+
+  const { themeSentimentCounts, totalScored } = phase2bResult;
+
+  // Format theme data for Claude — include sentiment breakdown and lang info
+  const themeLines = Object.entries(themeSentimentCounts)
+    .filter(([, v]) => v.total >= MIN_THEME_FREQ)
+    .sort((a, b) => b[1].total - a[1].total)
+    .map(([theme, { positive, negative, neutral, total, langs }]) => {
+      const posPct = total > 0 ? Math.round((positive / total) * 100) : 0;
+      const negPct = total > 0 ? Math.round((negative / total) * 100) : 0;
+      const neuPct = 100 - posPct - negPct;
+      const langSummary = Object.entries(langs)
+        .sort((a, b) => b[1] - a[1]).slice(0, 4)
+        .map(([l, n]) => `${l}:${n}`).join(', ');
+      return `"${theme}" | total:${total} | pos:${posPct}% neg:${negPct}% neu:${neuPct}% | langs:{${langSummary}}`;
+    })
+    .join('\n');
+
+  console.log(`Sending themes to Claude for aggregation...`);
+
+  const prompt =
+    `Below is a list of theme strings extracted from Steam game reviews (${genre} genre) across multiple languages.\n` +
+    `Each line shows: theme | total mentions | sentiment split (pos/neg/neu %) | top languages\n\n` +
     `Your job:\n` +
-    `1. Group similar themes into canonical categories\n` +
-    `2. Count how many reviews mention each category\n` +
-    `3. Identify if any category is disproportionately mentioned in a specific language — flag it if a theme appears more than 2x the average rate in one language group\n` +
-    `4. Write a short paragraph (3-5 sentences) of insight for each major category\n\n` +
-    `Total reviews analyzed: ${totalAnalyzed}\n\n` +
-    `Input — each line is: "{theme}" | total:{count} | langs:{lang:count,...}\n\n` +
+    `1. Group similar themes into canonical categories (e.g. "unfair RNG", "luck-based outcomes", "random feels cheap" → "RNG & Randomness")\n` +
+    `2. For each category: sum total mentions, compute weighted positive/negative/neutral % across constituent themes\n` +
+    `3. Flag language skew if a category is mentioned 1.5x+ above average rate in one language group\n` +
+    `4. Write a short insight paragraph (3-5 sentences) per major category\n` +
+    `5. Write a 2-3 paragraph global_insight summary covering what players across all languages care about most and any regional differences\n\n` +
+    `Total reviews analyzed: ${totalScored}\n\n` +
     `${themeLines}\n\n` +
     `Return a JSON object:\n` +
     `{\n` +
@@ -372,19 +509,22 @@ async function runPhase2b(allThemes, totalAnalyzed) {
     `    {\n` +
     `      "name": "category name",\n` +
     `      "total_mentions": N,\n` +
-    `      "percent_of_reviews": X,\n` +
-    `      "language_skew": "zho players mention this 3x more than average" or null,\n` +
-    `      "insight": "paragraph of analysis"\n` +
+    `      "percent_of_reviews": X.X,\n` +
+    `      "positive_pct": N,\n` +
+    `      "neutral_pct": N,\n` +
+    `      "negative_pct": N,\n` +
+    `      "language_skew": "cmn players mention this 2x more than average" or null,\n` +
+    `      "insight": "..."\n` +
     `    }\n` +
     `  ],\n` +
-    `  "global_insight": "2-3 paragraph summary of what roguelike players across all languages care about most, and any notable regional differences"\n` +
+    `  "global_insight": "..."\n` +
     `}`;
 
-  const text   = await claudeCall(prompt);
-  const parsed = parseJsonResponse(text, 'theme aggregation');
+  const text   = await claudeCall(prompt, 4096);
+  const parsed = parseJsonResponse(text, 'category aggregation');
 
   if (!parsed.categories || !Array.isArray(parsed.categories)) {
-    throw new Error(`Aggregation response missing categories array: ${text.slice(0, 300)}`);
+    throw new Error(`Aggregation missing categories array: ${text.slice(0, 300)}`);
   }
 
   console.log(`Aggregation complete. ${parsed.categories.length} canonical categories identified.\n`);
@@ -396,28 +536,33 @@ async function runPhase2b(allThemes, totalAnalyzed) {
 // ---------------------------------------------------------------------------
 async function main() {
   const startTime = Date.now();
-  console.log('Griffin sentiment analysis — two-phase\n');
+  console.log(`Griffin sentiment analysis — ${genre}\n`);
 
-  // ---- Setup ----
-  console.log('Loading roguelike app IDs from tags.csv...');
-  const roguelikeIds = loadRoguelikeAppIds(TAGS_CSV);
-  console.log(`Found ${roguelikeIds.size} roguelike games.`);
+  // ---- Load genre app_ids ----
+  console.log(`Loading ${genre} app IDs from tags.csv...`);
+  const genreIds = loadGenreAppIds();
+  console.log(`Found ${genreIds.size} ${genre} games.`);
 
-  // ---- Phase 1: Translation (skip if checkpoint exists) ----
-  let reviewEntries;
-  let translatedCount;
+  // ---- Phase 1: Translation ----
+  let reviewEntries, translatedCount;
 
-  if (fs.existsSync(TRANSLATED_CHECKPOINT)) {
-    console.log(`\nCheckpoint found — loading translated reviews from roguelike_translated.json (skipping Phase 1)...`);
-    reviewEntries    = JSON.parse(fs.readFileSync(TRANSLATED_CHECKPOINT, 'utf8'));
-    translatedCount  = reviewEntries.filter(e => e.was_translated).length;
-    console.log(`Loaded ${reviewEntries.length} reviews (${translatedCount} previously translated)\n`);
+  // Check for translated cache (new-format name first, then legacy for roguelike)
+  const translatedCachePath =
+    fs.existsSync(TRANSLATED_CACHE)                       ? TRANSLATED_CACHE :
+    LEGACY_TRANSLATED && fs.existsSync(LEGACY_TRANSLATED) ? LEGACY_TRANSLATED :
+    null;
+
+  if (translatedCachePath) {
+    console.log(`\nCheckpoint found — loading translated reviews from ${path.basename(translatedCachePath)} (skipping Phase 1)...`);
+    reviewEntries   = JSON.parse(fs.readFileSync(translatedCachePath, 'utf8'));
+    translatedCount = reviewEntries.filter(e => e.was_translated).length;
+    console.log(`Loaded ${reviewEntries.length} reviews (${translatedCount} translated)\n`);
   } else {
     console.log('Loading reviews from reviews.json...');
     const allReviews = JSON.parse(fs.readFileSync(REVIEWS_JSON, 'utf8'));
 
     reviewEntries = [];
-    for (const appId of roguelikeIds) {
+    for (const appId of genreIds) {
       const texts = allReviews[appId];
       if (!Array.isArray(texts) || texts.length === 0) continue;
       for (const text of texts) {
@@ -428,46 +573,67 @@ async function main() {
     }
 
     console.log(`Total reviews: ${reviewEntries.length}\n`);
-    if (reviewEntries.length === 0) { console.log('Nothing to analyze. Exiting.'); process.exit(0); }
+    if (reviewEntries.length === 0) { console.log('No reviews found. Exiting.'); process.exit(0); }
 
     await runPhase1(reviewEntries);
     translatedCount = reviewEntries.filter(e => e.was_translated).length;
   }
 
-  // ---- Phase 2a: Analysis (skip if checkpoint exists) ----
-  let sentimentCounts, allThemes, totalAnalyzed;
+  // ---- Phase 2a: Theme extraction ----
+  let phase2aResult;
 
-  if (fs.existsSync(ANALYSIS_CHECKPOINT)) {
-    console.log(`Checkpoint found — loading analysis results from roguelike_analysis.json (skipping Phase 2a)...`);
-    ({ sentimentCounts, allThemes, totalAnalyzed } = JSON.parse(fs.readFileSync(ANALYSIS_CHECKPOINT, 'utf8')));
-    console.log(`Loaded: ${totalAnalyzed} analyzed | ${allThemes.length} theme strings\n`);
+  if (fs.existsSync(THEMES_RAW)) {
+    console.log(`Checkpoint found — loading themes from ${genre}_themes_raw.json (skipping Phase 2a)...`);
+    phase2aResult = JSON.parse(fs.readFileSync(THEMES_RAW, 'utf8'));
+    console.log(`Loaded: ${phase2aResult.reviewThemeMap.length} reviews | ${phase2aResult.themes.length} unique themes\n`);
   } else {
-    ({ sentimentCounts, allThemes, totalAnalyzed } = await runPhase2a(reviewEntries));
+    phase2aResult = await runPhase2a(reviewEntries);
   }
 
-  // ---- Phase 2b: Aggregation ----
+  // ---- Phase 2b: Theme-level sentiment scoring ----
+  let phase2bResult;
+
+  if (fs.existsSync(THEME_SENTIMENTS)) {
+    console.log(`Checkpoint found — loading theme sentiments from ${genre}_theme_sentiments.json (skipping Phase 2b)...`);
+    phase2bResult = JSON.parse(fs.readFileSync(THEME_SENTIMENTS, 'utf8'));
+    const scored = Object.values(phase2bResult.themeSentimentCounts).reduce((s, t) => s + t.total, 0);
+    console.log(`Loaded: ${phase2bResult.totalScored} reviews | ${scored} theme sentiments\n`);
+  } else {
+    phase2bResult = await runPhase2b(reviewEntries, phase2aResult);
+  }
+
+  // ---- Phase 2c: Aggregation ----
   let aggregation;
   try {
-    aggregation = await runPhase2b(allThemes, totalAnalyzed);
+    aggregation = await runPhase2c(phase2bResult, reviewEntries.length);
   } catch (err) {
-    console.error(`Phase 2b aggregation failed: ${err.message}`);
+    console.error(`Phase 2c aggregation failed: ${err.message}`);
     aggregation = { categories: [], global_insight: 'Aggregation failed — see logs.' };
   }
 
-  // ---- Write output ----
-  const total = totalAnalyzed;
+  // ---- Compute top-level sentiment from Phase 2b review sentiments ----
+  const sentimentCounts = { positive: 0, negative: 0, mixed: 0 };
+  for (const s of phase2bResult.reviewSentiments) {
+    if (s === 'positive')      sentimentCounts.positive++;
+    else if (s === 'negative') sentimentCounts.negative++;
+    else                       sentimentCounts.mixed++;
+  }
+  const total = phase2bResult.totalScored;
   const pct   = n => total > 0 ? Math.round((n / total) * 1000) / 10 : 0;
 
+  // ---- Write final output ----
   const output = {
-    generated_at:      new Date().toISOString(),
-    total_reviews:     reviewEntries.length,
+    generated_at:       new Date().toISOString(),
+    genre,
+    total_reviews:      reviewEntries.length,
     translated_reviews: translatedCount,
+    reviews_analyzed:   total,
     sentiment: {
       positive: { count: sentimentCounts.positive, percent: pct(sentimentCounts.positive) },
       negative: { count: sentimentCounts.negative, percent: pct(sentimentCounts.negative) },
       mixed:    { count: sentimentCounts.mixed,    percent: pct(sentimentCounts.mixed)    },
     },
-    categories:    aggregation.categories,
+    categories:     aggregation.categories,
     global_insight: aggregation.global_insight,
   };
 
@@ -477,19 +643,23 @@ async function main() {
   const mins    = Math.floor(elapsed / 60);
   const secs    = elapsed % 60;
 
-  console.log(`Output written to roguelike_sentiment.json`);
+  console.log(`Output written to ${genre}_sentiment.json`);
   console.log(`\n${'─'.repeat(60)}`);
   console.log(`Complete in ${mins}m ${secs}s`);
-  console.log(`Reviews: ${reviewEntries.length} total | ${translatedCount} translated | ${totalAnalyzed} analyzed`);
+  console.log(`Reviews: ${reviewEntries.length} total | ${translatedCount} translated | ${total} analyzed`);
   console.log(`Sentiment: ${sentimentCounts.positive} positive (${pct(sentimentCounts.positive)}%) | ${sentimentCounts.negative} negative (${pct(sentimentCounts.negative)}%) | ${sentimentCounts.mixed} mixed (${pct(sentimentCounts.mixed)}%)`);
   console.log(`Categories: ${aggregation.categories.length}`);
+
   if (aggregation.categories.length > 0) {
     console.log('\nTop categories by mentions:');
     aggregation.categories
       .slice()
       .sort((a, b) => b.total_mentions - a.total_mentions)
       .slice(0, 10)
-      .forEach(c => console.log(`  ${c.name.padEnd(35)} ${String(c.total_mentions).padStart(5)} mentions (${c.percent_of_reviews}%)`));
+      .forEach(c => {
+        const bar = `pos:${c.positive_pct}% neg:${c.negative_pct}% neu:${c.neutral_pct}%`;
+        console.log(`  ${c.name.padEnd(38)} ${String(c.total_mentions).padStart(4)} mentions | ${bar}`);
+      });
   }
 }
 
